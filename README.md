@@ -37,6 +37,33 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Multimodal Usage
+
+```nim
+import std/asyncdispatch
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  let content = contentFromParts(@[
+    partFromText("Describe this image."),
+    partFromFileUri("gs://my-bucket/cat.png", "image/png"),
+    # Inline bytes must be base64-encoded.
+    partFromInlineData("application/pdf", "BASE64_DATA_HERE")
+  ])
+
+  let resp = await client.generateContent(
+    model = "gemini-2.5-flash",
+    contents = @[content]
+  )
+
+  echo resp.text
+  client.close()
+
+waitFor main()
+```
+
 ## Streaming Usage
 
 ```nim
@@ -78,5 +105,6 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 ## Notes
 
 - This MVP supports `generateContent` and `generateContentStream` for text.
+- `generateContent` supports text, `inlineData`, and `fileData` parts.
 - Vertex AI and most advanced APIs are not implemented yet (see
   `/Users/nakagawa_shota/repo/valit/nim-genai/FUTURE_TASKS.md`).
