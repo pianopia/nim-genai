@@ -1,4 +1,4 @@
-import std/[json, unittest]
+import std/[json, options, unittest]
 
 import ../src/nim_genai/types
 
@@ -39,3 +39,72 @@ suite "Multimodal parts":
     check j["parts"][0]["text"].getStr() == "What is in this image?"
     check j["parts"][1]["fileData"]["fileUri"].getStr() == "gs://bucket/image.png"
     check j["parts"][2]["inlineData"]["mimeType"].getStr() == "application/pdf"
+
+  test "system instruction content uses system role":
+    let si = systemInstructionFromText("Only answer in JSON.")
+    let j = si.toJson()
+    check j["role"].getStr() == "system"
+    check j["parts"][0]["text"].getStr() == "Only answer in JSON."
+
+  test "function call and function response parts serialize":
+    let functionCallPart = partFromFunctionCall("getWeather", %*{"city": "Tokyo"})
+    let functionResponsePart = partFromFunctionResponse(
+      "getWeather",
+      %*{"temperature": 21, "unit": "celsius"}
+    )
+    let callJson = functionCallPart.toJson()
+    let responseJson = functionResponsePart.toJson()
+    check callJson["functionCall"]["name"].getStr() == "getWeather"
+    check callJson["functionCall"]["args"]["city"].getStr() == "Tokyo"
+    check responseJson["functionResponse"]["name"].getStr() == "getWeather"
+    check responseJson["functionResponse"]["response"]["temperature"].getInt() == 21
+
+  test "tool declarations and tool config serialize":
+    let decl = functionDeclaration(
+      "getWeather",
+      "Returns weather by city.",
+      %*{
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"}
+        },
+        "required": ["city"]
+      }
+    )
+    let cfg = GenerateContentConfig(
+      tools: @[toolFromFunctions(@[decl])],
+      toolConfig: some(toolConfig(functionCallingConfig(
+        mode = fcmAny,
+        allowedFunctionNames = @["getWeather"]
+      )))
+    )
+    let j = cfg.toJson()
+    check j["tools"].kind == JArray
+    check j["tools"].len == 1
+    check j["tools"][0]["functionDeclarations"][0]["name"].getStr() == "getWeather"
+    check j["toolConfig"]["functionCallingConfig"]["mode"].getStr() == "ANY"
+    check j["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0].getStr() == "getWeather"
+
+  test "extracts function calls from response payload":
+    let raw = %*{
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "functionCall": {
+                  "name": "getWeather",
+                  "args": {
+                    "city": "Tokyo"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+    let calls = extractFunctionCalls(raw)
+    check calls.len == 1
+    check calls[0].name == "getWeather"
+    check calls[0].args["city"].getStr() == "Tokyo"

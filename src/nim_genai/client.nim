@@ -66,9 +66,15 @@ proc close*(client: Client) =
     return
   client.http.close()
 
+proc optionalSystemInstruction(systemInstruction: string): Option[Content] =
+  if systemInstruction.len == 0:
+    result = none(Content)
+  else:
+    result = some(systemInstructionFromText(systemInstruction))
+
 proc buildGenerateContentRequest(contents: seq[Content],
                                  config: GenerateContentConfig,
-                                 systemInstruction: string): JsonNode =
+                                 systemInstruction: Option[Content]): JsonNode =
   result = newJObject()
 
   let contentsNode = newJArray()
@@ -76,12 +82,8 @@ proc buildGenerateContentRequest(contents: seq[Content],
     contentsNode.add(content.toJson())
   result["contents"] = contentsNode
 
-  if systemInstruction.len > 0:
-    let systemNode = newJObject()
-    let partsNode = newJArray()
-    partsNode.add(%*{"text": systemInstruction})
-    systemNode["parts"] = partsNode
-    result["systemInstruction"] = systemNode
+  if systemInstruction.isSome:
+    result["systemInstruction"] = systemInstruction.get().toJson()
 
   let configNode = config.toJson()
   if configNode.len > 0:
@@ -110,12 +112,16 @@ proc parsePayloadToResponse(payload: string, fallbackCode: int): GenerateContent
   let raw = parseJson(payload)
   if raw.kind == JObject and raw.hasKey("error"):
     raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
-  result = GenerateContentResponse(raw: raw, text: extractText(raw))
+  result = GenerateContentResponse(
+    raw: raw,
+    text: extractText(raw),
+    functionCalls: extractFunctionCalls(raw)
+  )
 
-proc generateContent*(client: Client, model: string, contents: seq[Content],
-                      config: GenerateContentConfig = GenerateContentConfig(),
-                      systemInstruction: string = ""): Future[GenerateContentResponse]
-                      {.async.} =
+proc generateContentInternal(client: Client, model: string, contents: seq[Content],
+                             config: GenerateContentConfig,
+                             systemInstruction: Option[Content]): Future[GenerateContentResponse]
+                             {.async.} =
   if client.isNil:
     raise newException(ValueError, "Client is nil")
   if model.len == 0:
@@ -137,6 +143,30 @@ proc generateContent*(client: Client, model: string, contents: seq[Content],
 
   result = parsePayloadToResponse(respBody, statusCode)
 
+proc generateContent*(client: Client, model: string, contents: seq[Content],
+                      config: GenerateContentConfig = GenerateContentConfig(),
+                      systemInstruction: string = ""): Future[GenerateContentResponse]
+                      {.async.} =
+  result = await generateContentInternal(
+    client,
+    model,
+    contents,
+    config,
+    optionalSystemInstruction(systemInstruction)
+  )
+
+proc generateContent*(client: Client, model: string, contents: seq[Content],
+                      config: GenerateContentConfig,
+                      systemInstruction: Content): Future[GenerateContentResponse]
+                      {.async.} =
+  result = await generateContentInternal(
+    client,
+    model,
+    contents,
+    config,
+    some(systemInstruction)
+  )
+
 proc generateContent*(client: Client, model: string, prompt: string,
                       config: GenerateContentConfig = GenerateContentConfig(),
                       systemInstruction: string = ""): Future[GenerateContentResponse]
@@ -144,9 +174,16 @@ proc generateContent*(client: Client, model: string, prompt: string,
   let content = contentFromText(prompt)
   result = await client.generateContent(model, @[content], config, systemInstruction)
 
-proc generateContentStream*(client: Client, model: string, contents: seq[Content],
-                            config: GenerateContentConfig = GenerateContentConfig(),
-                            systemInstruction: string = ""): FutureStream[GenerateContentResponse] =
+proc generateContent*(client: Client, model: string, prompt: string,
+                      config: GenerateContentConfig,
+                      systemInstruction: Content): Future[GenerateContentResponse]
+                      {.async.} =
+  let content = contentFromText(prompt)
+  result = await client.generateContent(model, @[content], config, systemInstruction)
+
+proc generateContentStreamInternal(client: Client, model: string, contents: seq[Content],
+                                   config: GenerateContentConfig,
+                                   systemInstruction: Option[Content]): FutureStream[GenerateContentResponse] =
   if client.isNil:
     raise newException(ValueError, "Client is nil")
   if model.len == 0:
@@ -197,9 +234,41 @@ proc generateContentStream*(client: Client, model: string, contents: seq[Content
 
   asyncCheck runStream()
 
+proc generateContentStream*(client: Client, model: string, contents: seq[Content],
+                            config: GenerateContentConfig = GenerateContentConfig(),
+                            systemInstruction: string = ""): FutureStream[GenerateContentResponse] =
+  result = generateContentStreamInternal(
+    client,
+    model,
+    contents,
+    config,
+    optionalSystemInstruction(systemInstruction)
+  )
+
+proc generateContentStream*(client: Client, model: string, contents: seq[Content],
+                            config: GenerateContentConfig,
+                            systemInstruction: Content): FutureStream[GenerateContentResponse] =
+  result = generateContentStreamInternal(
+    client,
+    model,
+    contents,
+    config,
+    some(systemInstruction)
+  )
+
 proc generateContentStream*(client: Client, model: string, prompt: string,
                             config: GenerateContentConfig = GenerateContentConfig(),
                             systemInstruction: string = ""): FutureStream[GenerateContentResponse] =
+  result = client.generateContentStream(
+    model = model,
+    contents = @[contentFromText(prompt)],
+    config = config,
+    systemInstruction = systemInstruction
+  )
+
+proc generateContentStream*(client: Client, model: string, prompt: string,
+                            config: GenerateContentConfig,
+                            systemInstruction: Content): FutureStream[GenerateContentResponse] =
   result = client.generateContentStream(
     model = model,
     contents = @[contentFromText(prompt)],

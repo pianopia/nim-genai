@@ -6,8 +6,8 @@ implemented in the current Nim MVP.
 ## API Coverage
 - [x] Streaming (`generateContentStream`) for text (SSE)
 - [x] Multimodal parts for `generateContent` (images, files, inline data)
-- [ ] Tool calls / function calling in `generateContent`
-- [ ] System instruction as structured content
+- [x] Tool calls / function calling in `generateContent` (manual flow)
+- [x] System instruction as structured content
 - [ ] Embeddings / `embedContent`
 - [ ] Image generation / editing / upscaling
 - [ ] Video generation / extension (Veo)

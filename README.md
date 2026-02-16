@@ -64,6 +64,89 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Structured System Instruction
+
+```nim
+import std/asyncdispatch
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+  let systemInstruction = contentFromParts(@[
+    partFromText("You are a strict JSON API."),
+    partFromText("Always respond with a single JSON object.")
+  ], role = "system")
+
+  let resp = await client.generateContent(
+    model = "gemini-2.5-flash",
+    prompt = "Give me today's weather format.",
+    config = GenerateContentConfig(),
+    systemInstruction = systemInstruction
+  )
+
+  echo resp.text
+  client.close()
+
+waitFor main()
+```
+
+## Function Calling
+
+```nim
+import std/[asyncdispatch, json, options]
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  let getWeatherDecl = functionDeclaration(
+    "getWeather",
+    "Returns weather by city.",
+    %*{
+      "type": "object",
+      "properties": {
+        "city": {"type": "string"}
+      },
+      "required": ["city"]
+    }
+  )
+
+  let config = GenerateContentConfig(
+    tools: @[toolFromFunctions(@[getWeatherDecl])],
+    toolConfig: some(toolConfig(functionCallingConfig(
+      mode = fcmAny,
+      allowedFunctionNames = @["getWeather"]
+    )))
+  )
+
+  let first = await client.generateContent(
+    model = "gemini-2.5-flash",
+    prompt = "What's the weather in Tokyo?",
+    config = config
+  )
+
+  if first.functionCalls.len > 0:
+    let call = first.functionCalls[0]
+    let toolResponse = contentFromFunctionResponse(
+      call.name,
+      %*{"temperature": 21, "unit": "celsius", "city": "Tokyo"}
+    )
+
+    let second = await client.generateContent(
+      model = "gemini-2.5-flash",
+      contents = @[
+        contentFromText("What's the weather in Tokyo?"),
+        toolResponse
+      ],
+      config = config
+    )
+    echo second.text
+
+  client.close()
+
+waitFor main()
+```
+
 ## Streaming Usage
 
 ```nim
@@ -106,5 +189,7 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 
 - This MVP supports `generateContent` and `generateContentStream` for text.
 - `generateContent` supports text, `inlineData`, and `fileData` parts.
+- `systemInstruction` supports both text and structured `Content`.
+- Basic tool declarations and function calls are supported.
 - Vertex AI and most advanced APIs are not implemented yet (see
   `/Users/nakagawa_shota/repo/valit/nim-genai/FUTURE_TASKS.md`).
