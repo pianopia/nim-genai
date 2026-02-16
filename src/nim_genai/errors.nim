@@ -4,7 +4,14 @@ type
     responseBody*: string
 
 proc newGenAIError*(statusCode: int, responseBody: string): ref GenAIError =
-  let e = newException(GenAIError, "GenAI API error (HTTP " & $statusCode & ")")
+  var msg = "GenAI API error (HTTP " & $statusCode & ")"
+  if responseBody.len > 0:
+    var body = responseBody
+    const maxLen = 4096
+    if body.len > maxLen:
+      body = body[0 ..< maxLen] & "…"
+    msg.add(": " & body)
+  let e = newException(GenAIError, msg)
   e.statusCode = statusCode
   e.responseBody = responseBody
   return e
