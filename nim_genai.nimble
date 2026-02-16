@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = ""
+description   = "Nim client for Google GenAI (Gemini API) - MVP"
+license       = "Apache-2.0"
+srcDir        = "src"
+requires "nim >= 2.2.0"
