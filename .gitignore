@@ -1,1 +1,14 @@
 python-genai
+nimcache/
+.nimcache/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.pdb
+*.dSYM/

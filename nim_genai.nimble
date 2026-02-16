@@ -1,5 +1,5 @@
 version       = "0.1.0"
-author        = ""
+author        = "pianopia"
 description   = "Nim client for Google GenAI (Gemini API) - MVP"
 license       = "Apache-2.0"
 srcDir        = "src"
