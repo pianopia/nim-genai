@@ -37,6 +37,31 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Streaming Usage
+
+```nim
+import std/asyncdispatch
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+  let stream = client.generateContentStream(
+    model = "gemini-2.5-flash",
+    prompt = "Write a haiku about Nim."
+  )
+
+  while true:
+    let (hasChunk, chunk) = await stream.read()
+    if not hasChunk:
+      break
+    stdout.write(chunk.text)
+  echo ""
+
+  client.close()
+
+waitFor main()
+```
+
 You can also import using the module name with backticks:
 
 ```nim
@@ -52,6 +77,6 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 
 ## Notes
 
-- This MVP only supports `generateContent` with text prompts.
-- Streaming, Vertex AI, and other features are not implemented yet (see
-  `FUTURE_TASKS.md`).
+- This MVP supports `generateContent` and `generateContentStream` for text.
+- Vertex AI and most advanced APIs are not implemented yet (see
+  `/Users/nakagawa_shota/repo/valit/nim-genai/FUTURE_TASKS.md`).

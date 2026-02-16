@@ -1,7 +1,8 @@
-import std/[asyncdispatch, httpclient, json, options, os, strutils]
+import std/[asyncdispatch, asyncstreams, httpclient, json, options, os, strutils]
 
 import ./types
 import ./errors
+import ./streaming
 
 const
   DefaultBaseUrl* = "https://generativelanguage.googleapis.com/"
@@ -86,6 +87,31 @@ proc buildGenerateContentRequest(contents: seq[Content],
   if configNode.len > 0:
     result["generationConfig"] = configNode
 
+proc buildGenerateContentUrl(client: Client, model: string, stream: bool): string =
+  let modelPath = normalizeModelPath(model)
+  var path = client.apiVersion & "/" & modelPath
+  if stream:
+    path.add(":streamGenerateContent?alt=sse")
+  else:
+    path.add(":generateContent")
+  result = joinUrl(client.baseUrl, path)
+
+proc extractErrorCode(raw: JsonNode, fallbackCode: int): int =
+  result = fallbackCode
+  try:
+    if raw.kind == JObject and raw.hasKey("error"):
+      let err = raw["error"]
+      if err.kind == JObject and err.hasKey("code"):
+        result = err["code"].getInt()
+  except CatchableError:
+    discard
+
+proc parsePayloadToResponse(payload: string, fallbackCode: int): GenerateContentResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = GenerateContentResponse(raw: raw, text: extractText(raw))
+
 proc generateContent*(client: Client, model: string, contents: seq[Content],
                       config: GenerateContentConfig = GenerateContentConfig(),
                       systemInstruction: string = ""): Future[GenerateContentResponse]
@@ -97,9 +123,7 @@ proc generateContent*(client: Client, model: string, contents: seq[Content],
   if contents.len == 0:
     raise newException(ValueError, "contents is required")
 
-  let modelPath = normalizeModelPath(model)
-  let path = client.apiVersion & "/" & modelPath & ":generateContent"
-  let url = joinUrl(client.baseUrl, path)
+  let url = buildGenerateContentUrl(client, model, stream = false)
 
   let bodyJson = buildGenerateContentRequest(contents, config, systemInstruction)
   let bodyStr = $bodyJson
@@ -111,9 +135,7 @@ proc generateContent*(client: Client, model: string, contents: seq[Content],
   if statusCode < 200 or statusCode >= 300:
     raise newGenAIError(statusCode, respBody)
 
-  let raw = parseJson(respBody)
-  let text = extractText(raw)
-  result = GenerateContentResponse(raw: raw, text: text)
+  result = parsePayloadToResponse(respBody, statusCode)
 
 proc generateContent*(client: Client, model: string, prompt: string,
                       config: GenerateContentConfig = GenerateContentConfig(),
@@ -121,3 +143,66 @@ proc generateContent*(client: Client, model: string, prompt: string,
                       {.async.} =
   let content = contentFromText(prompt)
   result = await client.generateContent(model, @[content], config, systemInstruction)
+
+proc generateContentStream*(client: Client, model: string, contents: seq[Content],
+                            config: GenerateContentConfig = GenerateContentConfig(),
+                            systemInstruction: string = ""): FutureStream[GenerateContentResponse] =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if contents.len == 0:
+    raise newException(ValueError, "contents is required")
+
+  let stream = newFutureStream[GenerateContentResponse]("generateContentStream")
+  result = stream
+
+  proc runStream() {.async.} =
+    try:
+      let url = buildGenerateContentUrl(client, model, stream = true)
+      let bodyJson = buildGenerateContentRequest(contents, config, systemInstruction)
+      let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+      let statusCode = resp.code.int
+
+      if statusCode < 200 or statusCode >= 300:
+        let respBody = await resp.body()
+        raise newGenAIError(statusCode, respBody)
+
+      var parser: SseLineParser
+      var done = false
+
+      while not done:
+        let (hasValue, chunk) = await resp.bodyStream.read()
+        if not hasValue:
+          break
+        let payloads = parser.consumeSseChunk(chunk)
+        for payload in payloads:
+          if payload.len == 0:
+            continue
+          if payload == "[DONE]":
+            done = true
+            break
+          await stream.write(parsePayloadToResponse(payload, statusCode))
+
+      if not done:
+        let payloads = parser.flushSseChunkParser()
+        for payload in payloads:
+          if payload.len == 0 or payload == "[DONE]":
+            continue
+          await stream.write(parsePayloadToResponse(payload, statusCode))
+
+      stream.complete()
+    except CatchableError as exc:
+      stream.fail(exc)
+
+  asyncCheck runStream()
+
+proc generateContentStream*(client: Client, model: string, prompt: string,
+                            config: GenerateContentConfig = GenerateContentConfig(),
+                            systemInstruction: string = ""): FutureStream[GenerateContentResponse] =
+  result = client.generateContentStream(
+    model = model,
+    contents = @[contentFromText(prompt)],
+    config = config,
+    systemInstruction = systemInstruction
+  )
