@@ -9,7 +9,7 @@ implemented in the current Nim MVP.
 - [x] Tool calls / function calling in `generateContent` (manual + automatic)
 - [x] System instruction as structured content
 - [x] Embeddings / `embedContent`
-- [ ] Image generation / editing / upscaling
+- [x] Image generation / editing / upscaling
 - [ ] Video generation / extension (Veo)
 - [ ] Audio / speech features
 - [ ] Files API (upload, list, delete)

@@ -118,6 +118,58 @@ proc buildEmbedContentRequest(modelPath: string, contents: seq[Content],
     requestsNode.add(requestNode)
   result["requests"] = requestsNode
 
+proc buildGenerateImagesRequest(prompt: string,
+                                config: GenerateImagesConfig): JsonNode =
+  result = newJObject()
+  let instancesNode = newJArray()
+  let instanceNode = newJObject()
+  instanceNode["prompt"] = %prompt
+  instancesNode.add(instanceNode)
+  result["instances"] = instancesNode
+
+  let paramsNode = config.toJson()
+  if paramsNode.len > 0:
+    result["parameters"] = paramsNode
+
+proc buildEditImageRequest(prompt: string, image: Image,
+                           config: EditImageConfig): JsonNode =
+  result = newJObject()
+  let instancesNode = newJArray()
+  let instanceNode = newJObject()
+  instanceNode["prompt"] = %prompt
+  instanceNode["image"] = image.toJson()
+  instancesNode.add(instanceNode)
+  result["instances"] = instancesNode
+
+  var paramsNode = config.toJson()
+  paramsNode["mode"] = %"edit"
+  if paramsNode.len > 0:
+    result["parameters"] = paramsNode
+
+proc buildUpscaleImageRequest(image: Image, upscaleFactor: string,
+                              config: UpscaleImageConfig): JsonNode =
+  result = newJObject()
+  let instancesNode = newJArray()
+  let instanceNode = newJObject()
+  instanceNode["image"] = image.toJson()
+  instancesNode.add(instanceNode)
+  result["instances"] = instancesNode
+
+  var paramsNode = config.toJson()
+  paramsNode["mode"] = %"upscale"
+  if not paramsNode.hasKey("sampleCount"):
+    paramsNode["sampleCount"] = %1
+
+  var upscaleConfigNode: JsonNode
+  if paramsNode.hasKey("upscaleConfig") and paramsNode["upscaleConfig"].kind == JObject:
+    upscaleConfigNode = paramsNode["upscaleConfig"]
+  else:
+    upscaleConfigNode = newJObject()
+  upscaleConfigNode["upscaleFactor"] = %upscaleFactor
+  paramsNode["upscaleConfig"] = upscaleConfigNode
+
+  result["parameters"] = paramsNode
+
 proc buildGenerateContentUrl(client: Client, model: string, stream: bool): string =
   let modelPath = normalizeModelPath(model)
   var path = client.apiVersion & "/" & modelPath
@@ -130,6 +182,11 @@ proc buildGenerateContentUrl(client: Client, model: string, stream: bool): strin
 proc buildEmbedContentUrl(client: Client, model: string): string =
   let modelPath = normalizeModelPath(model)
   let path = client.apiVersion & "/" & modelPath & ":batchEmbedContents"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildPredictUrl(client: Client, model: string): string =
+  let modelPath = normalizeModelPath(model)
+  let path = client.apiVersion & "/" & modelPath & ":predict"
   result = joinUrl(client.baseUrl, path)
 
 proc extractErrorCode(raw: JsonNode, fallbackCode: int): int =
@@ -160,6 +217,46 @@ proc parseEmbedPayloadToResponse(payload: string, fallbackCode: int): EmbedConte
     raw: raw,
     embeddings: extractEmbeddings(raw),
     metadata: extractEmbedContentMetadata(raw)
+  )
+
+proc parseGenerateImagesPayloadToResponse(payload: string, fallbackCode: int): GenerateImagesResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+
+  let parsedImages = extractGeneratedImages(raw)
+  var generatedImages: seq[GeneratedImage] = @[]
+  var positivePromptSafetyAttributes = none(SafetyAttributes)
+  for generatedImage in parsedImages:
+    if generatedImage.safetyAttributes.isSome:
+      let safety = generatedImage.safetyAttributes.get()
+      if safety.contentType.isSome and safety.contentType.get() == "Positive Prompt":
+        positivePromptSafetyAttributes = some(safety)
+        continue
+    generatedImages.add(generatedImage)
+
+  result = GenerateImagesResponse(
+    raw: raw,
+    generatedImages: generatedImages,
+    positivePromptSafetyAttributes: positivePromptSafetyAttributes
+  )
+
+proc parseEditImagePayloadToResponse(payload: string, fallbackCode: int): EditImageResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = EditImageResponse(
+    raw: raw,
+    generatedImages: extractGeneratedImages(raw)
+  )
+
+proc parseUpscaleImagePayloadToResponse(payload: string, fallbackCode: int): UpscaleImageResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = UpscaleImageResponse(
+    raw: raw,
+    generatedImages: extractGeneratedImages(raw)
   )
 
 proc shouldDisableAfc(config: GenerateContentConfig): bool =
@@ -259,6 +356,85 @@ proc embedContentInternal(client: Client, model: string, contents: seq[Content],
     raise newGenAIError(statusCode, respBody)
 
   result = parseEmbedPayloadToResponse(respBody, statusCode)
+
+proc generateImagesInternal(client: Client, model: string, prompt: string,
+                            config: GenerateImagesConfig): Future[GenerateImagesResponse]
+                            {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if prompt.len == 0:
+    raise newException(ValueError, "prompt is required")
+
+  let url = buildPredictUrl(client, model)
+  let bodyJson = buildGenerateImagesRequest(prompt, config)
+
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGenerateImagesPayloadToResponse(respBody, statusCode)
+
+proc editImageInternal(client: Client, model: string, prompt: string,
+                       image: Image, config: EditImageConfig): Future[EditImageResponse]
+                       {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if prompt.len == 0:
+    raise newException(ValueError, "prompt is required")
+  if image.bytesBase64.len == 0:
+    raise newException(ValueError, "image bytes are required")
+  if image.mimeType.len == 0:
+    raise newException(ValueError, "image mimeType is required")
+
+  let url = buildPredictUrl(client, model)
+  let bodyJson = buildEditImageRequest(prompt, image, config)
+
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseEditImagePayloadToResponse(respBody, statusCode)
+
+proc upscaleImageInternal(client: Client, model: string, image: Image,
+                          upscaleFactor: string,
+                          config: UpscaleImageConfig): Future[UpscaleImageResponse]
+                          {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if image.bytesBase64.len == 0:
+    raise newException(ValueError, "image bytes are required")
+  if image.mimeType.len == 0:
+    raise newException(ValueError, "image mimeType is required")
+  if upscaleFactor.len == 0:
+    raise newException(ValueError, "upscaleFactor is required")
+
+  let normalizedFactor = upscaleFactor.strip().toLowerAscii()
+  if normalizedFactor != "x2" and normalizedFactor != "x4":
+    raise newException(ValueError, "upscaleFactor must be either x2 or x4")
+
+  let url = buildPredictUrl(client, model)
+  let bodyJson = buildUpscaleImageRequest(image, normalizedFactor, config)
+
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseUpscaleImagePayloadToResponse(respBody, statusCode)
 
 proc generateContentAfcInternal(client: Client, model: string,
                                 contents: seq[Content],
@@ -446,6 +622,22 @@ proc embed*(client: Client, model: string, texts: seq[string],
             config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
             {.async.} =
   result = await client.embedContent(model, texts, config)
+
+proc generateImages*(client: Client, model: string, prompt: string,
+                     config: GenerateImagesConfig = GenerateImagesConfig()): Future[GenerateImagesResponse]
+                     {.async.} =
+  result = await generateImagesInternal(client, model, prompt, config)
+
+proc editImage*(client: Client, model: string, prompt: string, image: Image,
+                config: EditImageConfig = EditImageConfig()): Future[EditImageResponse]
+                {.async.} =
+  result = await editImageInternal(client, model, prompt, image, config)
+
+proc upscaleImage*(client: Client, model: string, image: Image,
+                   upscaleFactor: string,
+                   config: UpscaleImageConfig = UpscaleImageConfig()): Future[UpscaleImageResponse]
+                   {.async.} =
+  result = await upscaleImageInternal(client, model, image, upscaleFactor, config)
 
 proc generateContentStreamInternal(client: Client, model: string, contents: seq[Content],
                                    config: GenerateContentConfig,

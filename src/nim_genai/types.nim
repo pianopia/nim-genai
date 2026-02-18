@@ -104,6 +104,69 @@ type
     embeddings*: seq[ContentEmbedding]
     metadata*: Option[EmbedContentMetadata]
 
+  Image* = object
+    mimeType*: string
+    bytesBase64*: string
+
+  SafetyAttributes* = object
+    categories*: seq[string]
+    scores*: seq[float]
+    contentType*: Option[string]
+
+  GeneratedImage* = object
+    image*: Option[Image]
+    raiFilteredReason*: Option[string]
+    safetyAttributes*: Option[SafetyAttributes]
+
+  GenerateImagesConfig* = object
+    numberOfImages*: Option[int]
+    aspectRatio*: Option[string]
+    guidanceScale*: Option[float]
+    safetyFilterLevel*: Option[string]
+    personGeneration*: Option[string]
+    includeSafetyAttributes*: Option[bool]
+    includeRaiReason*: Option[bool]
+    language*: Option[string]
+    outputMimeType*: Option[string]
+    outputCompressionQuality*: Option[int]
+    imageSize*: Option[string]
+
+  EditImageConfig* = object
+    numberOfImages*: Option[int]
+    aspectRatio*: Option[string]
+    guidanceScale*: Option[float]
+    safetyFilterLevel*: Option[string]
+    personGeneration*: Option[string]
+    includeSafetyAttributes*: Option[bool]
+    includeRaiReason*: Option[bool]
+    language*: Option[string]
+    outputMimeType*: Option[string]
+    outputCompressionQuality*: Option[int]
+    editMode*: Option[string]
+    baseSteps*: Option[int]
+
+  UpscaleImageConfig* = object
+    safetyFilterLevel*: Option[string]
+    personGeneration*: Option[string]
+    includeRaiReason*: Option[bool]
+    outputMimeType*: Option[string]
+    outputCompressionQuality*: Option[int]
+    enhanceInputImage*: Option[bool]
+    imagePreservationFactor*: Option[float]
+
+  GenerateImagesResponse* = object
+    raw*: JsonNode
+    generatedImages*: seq[GeneratedImage]
+    positivePromptSafetyAttributes*: Option[SafetyAttributes]
+
+  EditImageResponse* = object
+    raw*: JsonNode
+    generatedImages*: seq[GeneratedImage]
+
+  UpscaleImageResponse* = object
+    raw*: JsonNode
+    generatedImages*: seq[GeneratedImage]
+
 proc partFromText*(text: string): Part =
   Part(kind: pkText, text: text)
 
@@ -211,6 +274,88 @@ proc embedContentConfig*(taskType = none(string), title = none(string),
     outputDimensionality: outputDimensionality
   )
 
+proc imageFromBase64*(mimeType: string, dataBase64: string): Image =
+  if mimeType.len == 0:
+    raise newException(ValueError, "mimeType is required for image input")
+  if dataBase64.len == 0:
+    raise newException(ValueError, "dataBase64 is required for image input")
+  Image(mimeType: mimeType, bytesBase64: dataBase64)
+
+proc imageFromBytes*(data: openArray[byte], mimeType: string): Image =
+  result = imageFromBase64(mimeType, encode(data))
+
+proc imageFromBytes*(data: string, mimeType: string): Image =
+  result = imageFromBase64(mimeType, encode(data))
+
+proc generateImagesConfig*(numberOfImages = none(int),
+                           aspectRatio = none(string),
+                           guidanceScale = none(float),
+                           safetyFilterLevel = none(string),
+                           personGeneration = none(string),
+                           includeSafetyAttributes = none(bool),
+                           includeRaiReason = none(bool),
+                           language = none(string),
+                           outputMimeType = none(string),
+                           outputCompressionQuality = none(int),
+                           imageSize = none(string)): GenerateImagesConfig =
+  GenerateImagesConfig(
+    numberOfImages: numberOfImages,
+    aspectRatio: aspectRatio,
+    guidanceScale: guidanceScale,
+    safetyFilterLevel: safetyFilterLevel,
+    personGeneration: personGeneration,
+    includeSafetyAttributes: includeSafetyAttributes,
+    includeRaiReason: includeRaiReason,
+    language: language,
+    outputMimeType: outputMimeType,
+    outputCompressionQuality: outputCompressionQuality,
+    imageSize: imageSize
+  )
+
+proc editImageConfig*(numberOfImages = none(int),
+                      aspectRatio = none(string),
+                      guidanceScale = none(float),
+                      safetyFilterLevel = none(string),
+                      personGeneration = none(string),
+                      includeSafetyAttributes = none(bool),
+                      includeRaiReason = none(bool),
+                      language = none(string),
+                      outputMimeType = none(string),
+                      outputCompressionQuality = none(int),
+                      editMode = none(string),
+                      baseSteps = none(int)): EditImageConfig =
+  EditImageConfig(
+    numberOfImages: numberOfImages,
+    aspectRatio: aspectRatio,
+    guidanceScale: guidanceScale,
+    safetyFilterLevel: safetyFilterLevel,
+    personGeneration: personGeneration,
+    includeSafetyAttributes: includeSafetyAttributes,
+    includeRaiReason: includeRaiReason,
+    language: language,
+    outputMimeType: outputMimeType,
+    outputCompressionQuality: outputCompressionQuality,
+    editMode: editMode,
+    baseSteps: baseSteps
+  )
+
+proc upscaleImageConfig*(safetyFilterLevel = none(string),
+                         personGeneration = none(string),
+                         includeRaiReason = none(bool),
+                         outputMimeType = none(string),
+                         outputCompressionQuality = none(int),
+                         enhanceInputImage = none(bool),
+                         imagePreservationFactor = none(float)): UpscaleImageConfig =
+  UpscaleImageConfig(
+    safetyFilterLevel: safetyFilterLevel,
+    personGeneration: personGeneration,
+    includeRaiReason: includeRaiReason,
+    outputMimeType: outputMimeType,
+    outputCompressionQuality: outputCompressionQuality,
+    enhanceInputImage: enhanceInputImage,
+    imagePreservationFactor: imagePreservationFactor
+  )
+
 proc toJson*(functionCall: FunctionCall): JsonNode =
   result = newJObject()
   result["name"] = %functionCall.name
@@ -282,6 +427,94 @@ proc toJson*(config: EmbedContentConfig): JsonNode =
     result["title"] = %config.title.get()
   if config.outputDimensionality.isSome:
     result["outputDimensionality"] = %config.outputDimensionality.get()
+
+proc toJson*(image: Image): JsonNode =
+  result = newJObject()
+  result["bytesBase64Encoded"] = %image.bytesBase64
+  result["mimeType"] = %image.mimeType
+
+proc toJson*(config: GenerateImagesConfig): JsonNode =
+  result = newJObject()
+  if config.numberOfImages.isSome:
+    result["sampleCount"] = %config.numberOfImages.get()
+  if config.aspectRatio.isSome:
+    result["aspectRatio"] = %config.aspectRatio.get()
+  if config.guidanceScale.isSome:
+    result["guidanceScale"] = %config.guidanceScale.get()
+  if config.safetyFilterLevel.isSome:
+    result["safetySetting"] = %config.safetyFilterLevel.get()
+  if config.personGeneration.isSome:
+    result["personGeneration"] = %config.personGeneration.get()
+  if config.includeSafetyAttributes.isSome:
+    result["includeSafetyAttributes"] = %config.includeSafetyAttributes.get()
+  if config.includeRaiReason.isSome:
+    result["includeRaiReason"] = %config.includeRaiReason.get()
+  if config.language.isSome:
+    result["language"] = %config.language.get()
+  if config.imageSize.isSome:
+    result["sampleImageSize"] = %config.imageSize.get()
+  if config.outputMimeType.isSome or config.outputCompressionQuality.isSome:
+    var outputOptions = newJObject()
+    if config.outputMimeType.isSome:
+      outputOptions["mimeType"] = %config.outputMimeType.get()
+    if config.outputCompressionQuality.isSome:
+      outputOptions["compressionQuality"] = %config.outputCompressionQuality.get()
+    result["outputOptions"] = outputOptions
+
+proc toJson*(config: EditImageConfig): JsonNode =
+  result = newJObject()
+  if config.numberOfImages.isSome:
+    result["sampleCount"] = %config.numberOfImages.get()
+  if config.aspectRatio.isSome:
+    result["aspectRatio"] = %config.aspectRatio.get()
+  if config.guidanceScale.isSome:
+    result["guidanceScale"] = %config.guidanceScale.get()
+  if config.safetyFilterLevel.isSome:
+    result["safetySetting"] = %config.safetyFilterLevel.get()
+  if config.personGeneration.isSome:
+    result["personGeneration"] = %config.personGeneration.get()
+  if config.includeSafetyAttributes.isSome:
+    result["includeSafetyAttributes"] = %config.includeSafetyAttributes.get()
+  if config.includeRaiReason.isSome:
+    result["includeRaiReason"] = %config.includeRaiReason.get()
+  if config.language.isSome:
+    result["language"] = %config.language.get()
+  if config.editMode.isSome:
+    result["editMode"] = %config.editMode.get()
+  if config.baseSteps.isSome:
+    var editConfigNode = newJObject()
+    editConfigNode["baseSteps"] = %config.baseSteps.get()
+    result["editConfig"] = editConfigNode
+  if config.outputMimeType.isSome or config.outputCompressionQuality.isSome:
+    var outputOptions = newJObject()
+    if config.outputMimeType.isSome:
+      outputOptions["mimeType"] = %config.outputMimeType.get()
+    if config.outputCompressionQuality.isSome:
+      outputOptions["compressionQuality"] = %config.outputCompressionQuality.get()
+    result["outputOptions"] = outputOptions
+
+proc toJson*(config: UpscaleImageConfig): JsonNode =
+  result = newJObject()
+  if config.safetyFilterLevel.isSome:
+    result["safetySetting"] = %config.safetyFilterLevel.get()
+  if config.personGeneration.isSome:
+    result["personGeneration"] = %config.personGeneration.get()
+  if config.includeRaiReason.isSome:
+    result["includeRaiReason"] = %config.includeRaiReason.get()
+  if config.enhanceInputImage.isSome or config.imagePreservationFactor.isSome:
+    var upscaleConfigNode = newJObject()
+    if config.enhanceInputImage.isSome:
+      upscaleConfigNode["enhanceInputImage"] = %config.enhanceInputImage.get()
+    if config.imagePreservationFactor.isSome:
+      upscaleConfigNode["imagePreservationFactor"] = %config.imagePreservationFactor.get()
+    result["upscaleConfig"] = upscaleConfigNode
+  if config.outputMimeType.isSome or config.outputCompressionQuality.isSome:
+    var outputOptions = newJObject()
+    if config.outputMimeType.isSome:
+      outputOptions["mimeType"] = %config.outputMimeType.get()
+    if config.outputCompressionQuality.isSome:
+      outputOptions["compressionQuality"] = %config.outputCompressionQuality.get()
+    result["outputOptions"] = outputOptions
 
 proc toJson*(part: Part): JsonNode =
   result = newJObject()
@@ -434,3 +667,82 @@ proc extractEmbedContentMetadata*(raw: JsonNode): Option[EmbedContentMetadata] =
   except CatchableError:
     discard
   result = none(EmbedContentMetadata)
+
+proc extractSafetyAttributes*(raw: JsonNode): Option[SafetyAttributes] =
+  try:
+    if raw.kind != JObject:
+      return none(SafetyAttributes)
+    var safety = SafetyAttributes(
+      categories: @[],
+      scores: @[],
+      contentType: none(string)
+    )
+    var hasAny = false
+
+    if raw.hasKey("safetyAttributes") and raw["safetyAttributes"].kind == JObject:
+      let attributes = raw["safetyAttributes"]
+      if attributes.hasKey("categories") and attributes["categories"].kind == JArray:
+        for category in attributes["categories"]:
+          if category.kind == JString:
+            safety.categories.add(category.getStr())
+        hasAny = hasAny or safety.categories.len > 0
+      if attributes.hasKey("scores") and attributes["scores"].kind == JArray:
+        for score in attributes["scores"]:
+          if score.kind in {JInt, JFloat}:
+            safety.scores.add(score.getFloat())
+        hasAny = hasAny or safety.scores.len > 0
+
+    if raw.hasKey("contentType") and raw["contentType"].kind == JString:
+      safety.contentType = some(raw["contentType"].getStr())
+      hasAny = true
+
+    if hasAny:
+      return some(safety)
+  except CatchableError:
+    discard
+  result = none(SafetyAttributes)
+
+proc extractGeneratedImages*(raw: JsonNode): seq[GeneratedImage] =
+  try:
+    if raw.kind != JObject or (not raw.hasKey("predictions")):
+      return @[]
+    let predictions = raw["predictions"]
+    if predictions.kind != JArray:
+      return @[]
+
+    for prediction in predictions:
+      if prediction.kind != JObject:
+        continue
+
+      var generated = GeneratedImage(
+        image: none(Image),
+        raiFilteredReason: none(string),
+        safetyAttributes: none(SafetyAttributes)
+      )
+      var hasAny = false
+
+      if prediction.hasKey("bytesBase64Encoded") and prediction["bytesBase64Encoded"].kind == JString:
+        let mimeType =
+          if prediction.hasKey("mimeType") and prediction["mimeType"].kind == JString:
+            prediction["mimeType"].getStr()
+          else:
+            ""
+        generated.image = some(Image(
+          mimeType: mimeType,
+          bytesBase64: prediction["bytesBase64Encoded"].getStr()
+        ))
+        hasAny = true
+
+      if prediction.hasKey("raiFilteredReason") and prediction["raiFilteredReason"].kind == JString:
+        generated.raiFilteredReason = some(prediction["raiFilteredReason"].getStr())
+        hasAny = true
+
+      let safetyAttributes = extractSafetyAttributes(prediction)
+      if safetyAttributes.isSome:
+        generated.safetyAttributes = safetyAttributes
+        hasAny = true
+
+      if hasAny:
+        result.add(generated)
+  except CatchableError:
+    result = @[]

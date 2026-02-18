@@ -1,7 +1,7 @@
 # nim-genai (MVP)
 
 Nim client for Google GenAI (Gemini API). This is a minimal, async-only
-implementation focused on text generation.
+implementation focused on core generation APIs.
 
 ## Requirements
 
@@ -195,6 +195,48 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Image generation / editing / upscaling
+
+```nim
+import std/[asyncdispatch, base64, options]
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  let generated = await client.generateImages(
+    model = "imagen-4.0-generate-001",
+    prompt = "A red skateboard on white background",
+    config = generateImagesConfig(
+      numberOfImages = some(1),
+      outputMimeType = some("image/png")
+    )
+  )
+  if generated.generatedImages.len > 0 and generated.generatedImages[0].image.isSome:
+    let pngBytes = decode(generated.generatedImages[0].image.get().bytesBase64)
+    writeFile("generated.png", pngBytes)
+
+  let edited = await client.editImage(
+    model = "imagen-4.0-generate-001",
+    prompt = "Replace background with a beach",
+    image = imageFromBytes(readFile("generated.png"), "image/png"),
+    config = editImageConfig(editMode = some("EDIT_MODE_INPAINT_INSERTION"))
+  )
+  discard edited
+
+  let upscaled = await client.upscaleImage(
+    model = "imagen-4.0-upscale-preview",
+    image = imageFromBytes(readFile("generated.png"), "image/png"),
+    upscaleFactor = "x2",
+    config = upscaleImageConfig(enhanceInputImage = some(true))
+  )
+  discard upscaled
+
+  client.close()
+
+waitFor main()
+```
+
 You can also import using the module name with backticks:
 
 ```nim
@@ -211,6 +253,7 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 ## Notes
 
 - This MVP supports `generateContent`, `generateContentStream`, and `embedContent`.
+- Image APIs (`generateImages`, `editImage`, `upscaleImage`) are available via Imagen `:predict`.
 - `generateContent` supports text, `inlineData`, and `fileData` parts.
 - `systemInstruction` supports both text and structured `Content`.
 - Basic tool declarations, function calls, and automatic function calling are supported.
