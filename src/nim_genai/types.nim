@@ -44,6 +44,11 @@ type
   ToolConfig* = object
     functionCallingConfig*: Option[FunctionCallingConfig]
 
+  AutomaticFunctionCallingConfig* = object
+    disable*: Option[bool]
+    maximumRemoteCalls*: Option[int]
+    ignoreCallHistory*: Option[bool]
+
   Part* = object
     case kind*: PartKind
     of pkText:
@@ -70,11 +75,34 @@ type
     stopSequences*: seq[string]
     tools*: seq[Tool]
     toolConfig*: Option[ToolConfig]
+    automaticFunctionCalling*: Option[AutomaticFunctionCallingConfig]
 
   GenerateContentResponse* = object
     raw*: JsonNode
     text*: string
     functionCalls*: seq[FunctionCall]
+    automaticFunctionCallingHistory*: seq[Content]
+
+  EmbedContentConfig* = object
+    taskType*: Option[string]
+    title*: Option[string]
+    outputDimensionality*: Option[int]
+
+  ContentEmbeddingStatistics* = object
+    truncated*: Option[bool]
+    tokenCount*: Option[float]
+
+  ContentEmbedding* = object
+    values*: seq[float]
+    statistics*: Option[ContentEmbeddingStatistics]
+
+  EmbedContentMetadata* = object
+    billableCharacterCount*: Option[int]
+
+  EmbedContentResponse* = object
+    raw*: JsonNode
+    embeddings*: seq[ContentEmbedding]
+    metadata*: Option[EmbedContentMetadata]
 
 proc partFromText*(text: string): Part =
   Part(kind: pkText, text: text)
@@ -166,6 +194,23 @@ proc functionCallingConfig*(mode: FunctionCallingMode,
 proc toolConfig*(functionCallingConfig: FunctionCallingConfig): ToolConfig =
   ToolConfig(functionCallingConfig: some(functionCallingConfig))
 
+proc automaticFunctionCallingConfig*(disable = none(bool),
+                                     maximumRemoteCalls = none(int),
+                                     ignoreCallHistory = none(bool)): AutomaticFunctionCallingConfig =
+  AutomaticFunctionCallingConfig(
+    disable: disable,
+    maximumRemoteCalls: maximumRemoteCalls,
+    ignoreCallHistory: ignoreCallHistory
+  )
+
+proc embedContentConfig*(taskType = none(string), title = none(string),
+                         outputDimensionality = none(int)): EmbedContentConfig =
+  EmbedContentConfig(
+    taskType: taskType,
+    title: title,
+    outputDimensionality: outputDimensionality
+  )
+
 proc toJson*(functionCall: FunctionCall): JsonNode =
   result = newJObject()
   result["name"] = %functionCall.name
@@ -220,6 +265,24 @@ proc toJson*(toolConfig: ToolConfig): JsonNode =
   if toolConfig.functionCallingConfig.isSome:
     result["functionCallingConfig"] = toolConfig.functionCallingConfig.get().toJson()
 
+proc toJson*(automaticFunctionCallingConfig: AutomaticFunctionCallingConfig): JsonNode =
+  result = newJObject()
+  if automaticFunctionCallingConfig.disable.isSome:
+    result["disable"] = %automaticFunctionCallingConfig.disable.get()
+  if automaticFunctionCallingConfig.maximumRemoteCalls.isSome:
+    result["maximumRemoteCalls"] = %automaticFunctionCallingConfig.maximumRemoteCalls.get()
+  if automaticFunctionCallingConfig.ignoreCallHistory.isSome:
+    result["ignoreCallHistory"] = %automaticFunctionCallingConfig.ignoreCallHistory.get()
+
+proc toJson*(config: EmbedContentConfig): JsonNode =
+  result = newJObject()
+  if config.taskType.isSome:
+    result["taskType"] = %config.taskType.get()
+  if config.title.isSome:
+    result["title"] = %config.title.get()
+  if config.outputDimensionality.isSome:
+    result["outputDimensionality"] = %config.outputDimensionality.get()
+
 proc toJson*(part: Part): JsonNode =
   result = newJObject()
   case part.kind
@@ -270,6 +333,8 @@ proc toJson*(config: GenerateContentConfig): JsonNode =
     result["tools"] = toolsNode
   if config.toolConfig.isSome:
     result["toolConfig"] = config.toolConfig.get().toJson()
+  if config.automaticFunctionCalling.isSome:
+    result["automaticFunctionCalling"] = config.automaticFunctionCalling.get().toJson()
 
 proc extractFunctionCalls*(raw: JsonNode): seq[FunctionCall] =
   try:
@@ -316,3 +381,56 @@ proc extractText*(raw: JsonNode): string =
     result = texts.join("")
   except CatchableError:
     result = ""
+
+proc extractEmbeddings*(raw: JsonNode): seq[ContentEmbedding] =
+  try:
+    if raw.kind != JObject:
+      return @[]
+    if raw.hasKey("embeddings") and raw["embeddings"].kind == JArray:
+      for item in raw["embeddings"]:
+        if item.kind != JObject:
+          continue
+        var embedding = ContentEmbedding(values: @[], statistics: none(ContentEmbeddingStatistics))
+        if item.hasKey("values") and item["values"].kind == JArray:
+          for value in item["values"]:
+            if value.kind in {JInt, JFloat}:
+              embedding.values.add(value.getFloat())
+        if item.hasKey("statistics") and item["statistics"].kind == JObject:
+          var statistics = ContentEmbeddingStatistics()
+          var hasStatistics = false
+          let statsNode = item["statistics"]
+          if statsNode.hasKey("truncated") and statsNode["truncated"].kind == JBool:
+            statistics.truncated = some(statsNode["truncated"].getBool())
+            hasStatistics = true
+          if statsNode.hasKey("tokenCount") and statsNode["tokenCount"].kind in {JInt, JFloat}:
+            statistics.tokenCount = some(statsNode["tokenCount"].getFloat())
+            hasStatistics = true
+          if hasStatistics:
+            embedding.statistics = some(statistics)
+        result.add(embedding)
+  except CatchableError:
+    result = @[]
+
+proc extractEmbedContentMetadata*(raw: JsonNode): Option[EmbedContentMetadata] =
+  try:
+    if raw.kind != JObject or (not raw.hasKey("metadata")):
+      return none(EmbedContentMetadata)
+    let metadataNode = raw["metadata"]
+    if metadataNode.kind != JObject:
+      return none(EmbedContentMetadata)
+
+    var metadata = EmbedContentMetadata()
+    var hasMetadata = false
+    if metadataNode.hasKey("billableCharacterCount"):
+      let billableNode = metadataNode["billableCharacterCount"]
+      if billableNode.kind == JInt:
+        metadata.billableCharacterCount = some(billableNode.getInt())
+        hasMetadata = true
+      elif billableNode.kind == JFloat:
+        metadata.billableCharacterCount = some(int(billableNode.getFloat()))
+        hasMetadata = true
+    if hasMetadata:
+      return some(metadata)
+  except CatchableError:
+    discard
+  result = none(EmbedContentMetadata)

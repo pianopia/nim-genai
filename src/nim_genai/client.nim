@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asyncstreams, httpclient, json, options, os, strutils]
+import std/[asyncdispatch, asyncstreams, httpclient, json, options, os, strutils, tables]
 
 import ./types
 import ./errors
@@ -10,12 +10,27 @@ const
   DefaultUserAgent* = "nim-genai/0.1.0"
 
 type
+  FunctionHandler* = proc(args: JsonNode): Future[JsonNode] {.closure, gcsafe.}
+  FunctionHandlerMap* = Table[string, FunctionHandler]
+
   Client* = ref object
     apiKey*: string
     baseUrl*: string
     apiVersion*: string
     userAgent*: string
     http*: AsyncHttpClient
+
+const
+  DefaultMaxRemoteCallsAfc = 10
+
+proc newFunctionHandlerMap*(): FunctionHandlerMap =
+  initTable[string, FunctionHandler]()
+
+proc setFunctionHandler*(handlers: var FunctionHandlerMap, name: string,
+                         handler: FunctionHandler) =
+  if name.len == 0:
+    raise newException(ValueError, "handler name is required")
+  handlers[name] = handler
 
 proc joinUrl(base: string, path: string): string =
   var b = base
@@ -89,6 +104,20 @@ proc buildGenerateContentRequest(contents: seq[Content],
   if configNode.len > 0:
     result["generationConfig"] = configNode
 
+proc buildEmbedContentRequest(modelPath: string, contents: seq[Content],
+                              config: EmbedContentConfig): JsonNode =
+  result = newJObject()
+  let requestsNode = newJArray()
+  let configNode = config.toJson()
+  for content in contents:
+    let requestNode = newJObject()
+    requestNode["model"] = %modelPath
+    requestNode["content"] = content.toJson()
+    for key, value in configNode:
+      requestNode[key] = value
+    requestsNode.add(requestNode)
+  result["requests"] = requestsNode
+
 proc buildGenerateContentUrl(client: Client, model: string, stream: bool): string =
   let modelPath = normalizeModelPath(model)
   var path = client.apiVersion & "/" & modelPath
@@ -96,6 +125,11 @@ proc buildGenerateContentUrl(client: Client, model: string, stream: bool): strin
     path.add(":streamGenerateContent?alt=sse")
   else:
     path.add(":generateContent")
+  result = joinUrl(client.baseUrl, path)
+
+proc buildEmbedContentUrl(client: Client, model: string): string =
+  let modelPath = normalizeModelPath(model)
+  let path = client.apiVersion & "/" & modelPath & ":batchEmbedContents"
   result = joinUrl(client.baseUrl, path)
 
 proc extractErrorCode(raw: JsonNode, fallbackCode: int): int =
@@ -117,6 +151,66 @@ proc parsePayloadToResponse(payload: string, fallbackCode: int): GenerateContent
     text: extractText(raw),
     functionCalls: extractFunctionCalls(raw)
   )
+
+proc parseEmbedPayloadToResponse(payload: string, fallbackCode: int): EmbedContentResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = EmbedContentResponse(
+    raw: raw,
+    embeddings: extractEmbeddings(raw),
+    metadata: extractEmbedContentMetadata(raw)
+  )
+
+proc shouldDisableAfc(config: GenerateContentConfig): bool =
+  if config.automaticFunctionCalling.isSome:
+    let afc = config.automaticFunctionCalling.get()
+    if afc.maximumRemoteCalls.isSome and afc.maximumRemoteCalls.get() <= 0:
+      return true
+    if afc.disable.isSome:
+      return afc.disable.get()
+  return false
+
+proc getMaxRemoteCallsAfc(config: GenerateContentConfig): int =
+  if shouldDisableAfc(config):
+    return 0
+  if config.automaticFunctionCalling.isSome:
+    let afc = config.automaticFunctionCalling.get()
+    if afc.maximumRemoteCalls.isSome:
+      return afc.maximumRemoteCalls.get()
+  return DefaultMaxRemoteCallsAfc
+
+proc shouldAppendAfcHistory(config: GenerateContentConfig): bool =
+  if config.automaticFunctionCalling.isSome:
+    let afc = config.automaticFunctionCalling.get()
+    if afc.ignoreCallHistory.isSome:
+      return not afc.ignoreCallHistory.get()
+  return true
+
+proc getFunctionResponseParts(response: GenerateContentResponse,
+                              functionHandlers: FunctionHandlerMap): Future[seq[Part]] {.async.} =
+  for functionCall in response.functionCalls:
+    if not functionHandlers.hasKey(functionCall.name):
+      raise newException(KeyError, "Missing function handler: " & functionCall.name)
+    let handler = functionHandlers[functionCall.name]
+    var handlerResponse = newJObject()
+    try:
+      let handlerResult = await handler(functionCall.args)
+      if handlerResult.isNil:
+        handlerResponse["result"] = newJNull()
+      else:
+        handlerResponse["result"] = handlerResult
+    except CatchableError as exc:
+      handlerResponse["error"] = %exc.msg
+    result.add(partFromFunctionResponse(functionCall.name, handlerResponse))
+
+proc functionCallContentFromResponse(response: GenerateContentResponse): Option[Content] =
+  if response.functionCalls.len == 0:
+    return none(Content)
+  var parts: seq[Part] = @[]
+  for functionCall in response.functionCalls:
+    parts.add(partFromFunctionCall(functionCall.name, functionCall.args))
+  result = some(Content(role: "model", parts: parts))
 
 proc generateContentInternal(client: Client, model: string, contents: seq[Content],
                              config: GenerateContentConfig,
@@ -142,6 +236,81 @@ proc generateContentInternal(client: Client, model: string, contents: seq[Conten
     raise newGenAIError(statusCode, respBody)
 
   result = parsePayloadToResponse(respBody, statusCode)
+
+proc embedContentInternal(client: Client, model: string, contents: seq[Content],
+                          config: EmbedContentConfig): Future[EmbedContentResponse]
+                          {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if contents.len == 0:
+    raise newException(ValueError, "contents is required")
+
+  let modelPath = normalizeModelPath(model)
+  let bodyJson = buildEmbedContentRequest(modelPath, contents, config)
+  let url = buildEmbedContentUrl(client, model)
+
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseEmbedPayloadToResponse(respBody, statusCode)
+
+proc generateContentAfcInternal(client: Client, model: string,
+                                contents: seq[Content],
+                                functionHandlers: FunctionHandlerMap,
+                                config: GenerateContentConfig,
+                                systemInstruction: Option[Content]): Future[GenerateContentResponse]
+                                {.async.} =
+  if functionHandlers.len == 0 or shouldDisableAfc(config):
+    return await generateContentInternal(
+      client, model, contents, config, systemInstruction
+    )
+
+  var requestContents: seq[Content] = @[]
+  requestContents.add(contents)
+  var remainingRemoteCalls = getMaxRemoteCallsAfc(config)
+  if remainingRemoteCalls <= 0:
+    return await generateContentInternal(
+      client, model, contents, config, systemInstruction
+    )
+
+  let appendHistory = shouldAppendAfcHistory(config)
+  var afcHistory: seq[Content] = @[]
+  if appendHistory:
+    afcHistory.add(requestContents)
+
+  var response: GenerateContentResponse
+  while remainingRemoteCalls > 0:
+    response = await generateContentInternal(
+      client, model, requestContents, config, systemInstruction
+    )
+    if response.functionCalls.len == 0:
+      break
+
+    let functionResponseParts = await getFunctionResponseParts(response, functionHandlers)
+    if functionResponseParts.len == 0:
+      break
+
+    dec(remainingRemoteCalls)
+    let functionCallContent = functionCallContentFromResponse(response)
+    let functionResponseContent = Content(role: "user", parts: functionResponseParts)
+
+    if functionCallContent.isSome:
+      requestContents.add(functionCallContent.get())
+      if appendHistory:
+        afcHistory.add(functionCallContent.get())
+    requestContents.add(functionResponseContent)
+    if appendHistory:
+      afcHistory.add(functionResponseContent)
+
+  if appendHistory:
+    response.automaticFunctionCallingHistory = afcHistory
+  return response
 
 proc generateContent*(client: Client, model: string, contents: seq[Content],
                       config: GenerateContentConfig = GenerateContentConfig(),
@@ -180,6 +349,103 @@ proc generateContent*(client: Client, model: string, prompt: string,
                       {.async.} =
   let content = contentFromText(prompt)
   result = await client.generateContent(model, @[content], config, systemInstruction)
+
+proc generateContentAfc*(client: Client, model: string, contents: seq[Content],
+                         functionHandlers: FunctionHandlerMap,
+                         config: GenerateContentConfig = GenerateContentConfig(),
+                         systemInstruction: string = ""): Future[GenerateContentResponse]
+                         {.async.} =
+  result = await generateContentAfcInternal(
+    client,
+    model,
+    contents,
+    functionHandlers,
+    config,
+    optionalSystemInstruction(systemInstruction)
+  )
+
+proc generateContentAfc*(client: Client, model: string, contents: seq[Content],
+                         functionHandlers: FunctionHandlerMap,
+                         config: GenerateContentConfig,
+                         systemInstruction: Content): Future[GenerateContentResponse]
+                         {.async.} =
+  result = await generateContentAfcInternal(
+    client,
+    model,
+    contents,
+    functionHandlers,
+    config,
+    some(systemInstruction)
+  )
+
+proc generateContentAfc*(client: Client, model: string, prompt: string,
+                         functionHandlers: FunctionHandlerMap,
+                         config: GenerateContentConfig = GenerateContentConfig(),
+                         systemInstruction: string = ""): Future[GenerateContentResponse]
+                         {.async.} =
+  result = await client.generateContentAfc(
+    model = model,
+    contents = @[contentFromText(prompt)],
+    functionHandlers = functionHandlers,
+    config = config,
+    systemInstruction = systemInstruction
+  )
+
+proc generateContentAfc*(client: Client, model: string, prompt: string,
+                         functionHandlers: FunctionHandlerMap,
+                         config: GenerateContentConfig,
+                         systemInstruction: Content): Future[GenerateContentResponse]
+                         {.async.} =
+  result = await client.generateContentAfc(
+    model = model,
+    contents = @[contentFromText(prompt)],
+    functionHandlers = functionHandlers,
+    config = config,
+    systemInstruction = systemInstruction
+  )
+
+proc embedContent*(client: Client, model: string, contents: seq[Content],
+                   config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+                   {.async.} =
+  result = await embedContentInternal(client, model, contents, config)
+
+proc embedContent*(client: Client, model: string, content: Content,
+                   config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+                   {.async.} =
+  result = await embedContentInternal(client, model, @[content], config)
+
+proc embedContent*(client: Client, model: string, text: string,
+                   config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+                   {.async.} =
+  result = await embedContentInternal(client, model, @[contentFromText(text)], config)
+
+proc embedContent*(client: Client, model: string, texts: seq[string],
+                   config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+                   {.async.} =
+  var contents: seq[Content] = @[]
+  for text in texts:
+    contents.add(contentFromText(text))
+  result = await embedContentInternal(client, model, contents, config)
+
+proc embed*(client: Client, model: string, contents: seq[Content],
+            config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+            {.async.} =
+  result = await client.embedContent(model, contents, config)
+
+proc embed*(client: Client, model: string, content: Content,
+            config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+            {.async.} =
+  result = await client.embedContent(model, content, config)
+
+proc embed*(client: Client, model: string, text: string,
+            config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+            {.async.} =
+  result = await client.embedContent(model, text, config)
+
+proc embed*(client: Client, model: string, texts: seq[string],
+            config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
+            {.async.} =
+  result = await client.embedContent(model, texts, config)
 
 proc generateContentStreamInternal(client: Client, model: string, contents: seq[Content],
                                    config: GenerateContentConfig,

@@ -6,9 +6,9 @@ implemented in the current Nim MVP.
 ## API Coverage
 - [x] Streaming (`generateContentStream`) for text (SSE)
 - [x] Multimodal parts for `generateContent` (images, files, inline data)
-- [x] Tool calls / function calling in `generateContent` (manual flow)
+- [x] Tool calls / function calling in `generateContent` (manual + automatic)
 - [x] System instruction as structured content
-- [ ] Embeddings / `embedContent`
+- [x] Embeddings / `embedContent`
 - [ ] Image generation / editing / upscaling
 - [ ] Video generation / extension (Veo)
 - [ ] Audio / speech features
@@ -36,7 +36,7 @@ implemented in the current Nim MVP.
 - [ ] Built‑in pagination helpers
 
 ## Tooling & UX
-- [ ] Function calling / automatic function calling
+- [x] Function calling / automatic function calling (non-streaming)
 - [ ] Structured output / response schema helpers
 - [ ] Safety settings & moderation config helpers
 - [ ] Full request/response type coverage (parity with `types.py`)

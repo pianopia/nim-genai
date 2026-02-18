@@ -113,34 +113,29 @@ proc main() {.async.} =
 
   let config = GenerateContentConfig(
     tools: @[toolFromFunctions(@[getWeatherDecl])],
-    toolConfig: some(toolConfig(functionCallingConfig(
-      mode = fcmAny,
-      allowedFunctionNames = @["getWeather"]
+    automaticFunctionCalling: some(automaticFunctionCallingConfig(
+      disable = some(false),
+      maximumRemoteCalls = some(5)
     )))
   )
-
-  let first = await client.generateContent(
-    model = "gemini-2.5-flash",
-    prompt = "What's the weather in Tokyo?",
-    config = config
+  var handlers = newFunctionHandlerMap()
+  handlers.setFunctionHandler(
+    "getWeather",
+    proc(args: JsonNode): Future[JsonNode] {.async, gcsafe.} =
+      result = %*{
+        "city": args["city"].getStr(),
+        "temperature": 21,
+        "unit": "celsius"
+      }
   )
 
-  if first.functionCalls.len > 0:
-    let call = first.functionCalls[0]
-    let toolResponse = contentFromFunctionResponse(
-      call.name,
-      %*{"temperature": 21, "unit": "celsius", "city": "Tokyo"}
-    )
-
-    let second = await client.generateContent(
-      model = "gemini-2.5-flash",
-      contents = @[
-        contentFromText("What's the weather in Tokyo?"),
-        toolResponse
-      ],
-      config = config
-    )
-    echo second.text
+  let response = await client.generateContentAfc(
+    model = "gemini-2.5-flash",
+    prompt = "What's the weather in Tokyo?",
+    functionHandlers = handlers,
+    config = config
+  )
+  echo response.text
 
   client.close()
 
@@ -172,6 +167,34 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Embeddings (`embedContent`)
+
+```nim
+import std/[asyncdispatch, options]
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  let response = await client.embedContent(
+    model = "text-embedding-004",
+    texts = @["What is your name?", "I am a model."],
+    config = embedContentConfig(
+      taskType = some("RETRIEVAL_DOCUMENT"),
+      title = some("example-doc"),
+      outputDimensionality = some(128)
+    )
+  )
+
+  echo "embedding count: ", response.embeddings.len
+  if response.embeddings.len > 0:
+    echo "first vector length: ", response.embeddings[0].values.len
+
+  client.close()
+
+waitFor main()
+```
+
 You can also import using the module name with backticks:
 
 ```nim
@@ -187,9 +210,9 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 
 ## Notes
 
-- This MVP supports `generateContent` and `generateContentStream` for text.
+- This MVP supports `generateContent`, `generateContentStream`, and `embedContent`.
 - `generateContent` supports text, `inlineData`, and `fileData` parts.
 - `systemInstruction` supports both text and structured `Content`.
-- Basic tool declarations and function calls are supported.
+- Basic tool declarations, function calls, and automatic function calling are supported.
 - Vertex AI and most advanced APIs are not implemented yet (see
   `/Users/nakagawa_shota/repo/valit/nim-genai/FUTURE_TASKS.md`).

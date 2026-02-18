@@ -85,6 +85,19 @@ suite "Multimodal parts":
     check j["toolConfig"]["functionCallingConfig"]["mode"].getStr() == "ANY"
     check j["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0].getStr() == "getWeather"
 
+  test "automatic function calling config serializes":
+    let cfg = GenerateContentConfig(
+      automaticFunctionCalling: some(automaticFunctionCallingConfig(
+        disable = some(false),
+        maximumRemoteCalls = some(5),
+        ignoreCallHistory = some(false)
+      ))
+    )
+    let j = cfg.toJson()
+    check j["automaticFunctionCalling"]["disable"].getBool() == false
+    check j["automaticFunctionCalling"]["maximumRemoteCalls"].getInt() == 5
+    check j["automaticFunctionCalling"]["ignoreCallHistory"].getBool() == false
+
   test "extracts function calls from response payload":
     let raw = %*{
       "candidates": [
