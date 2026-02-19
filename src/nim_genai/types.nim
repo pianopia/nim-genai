@@ -167,6 +167,48 @@ type
     raw*: JsonNode
     generatedImages*: seq[GeneratedImage]
 
+  Video* = object
+    uri*: Option[string]
+    bytesBase64*: Option[string]
+    mimeType*: Option[string]
+
+  GenerateVideosSource* = object
+    prompt*: Option[string]
+    image*: Option[Image]
+    video*: Option[Video]
+
+  VideoGenerationReferenceImage* = object
+    image*: Image
+    referenceType*: Option[string]
+
+  GenerateVideosConfig* = object
+    numberOfVideos*: Option[int]
+    durationSeconds*: Option[int]
+    aspectRatio*: Option[string]
+    resolution*: Option[string]
+    personGeneration*: Option[string]
+    negativePrompt*: Option[string]
+    enhancePrompt*: Option[bool]
+    lastFrame*: Option[Image]
+    referenceImages*: seq[VideoGenerationReferenceImage]
+
+  GeneratedVideo* = object
+    video*: Option[Video]
+
+  GenerateVideosResponse* = object
+    generatedVideos*: seq[GeneratedVideo]
+    raiMediaFilteredCount*: Option[int]
+    raiMediaFilteredReasons*: seq[string]
+
+  GenerateVideosOperation* = object
+    raw*: JsonNode
+    name*: string
+    done*: Option[bool]
+    metadata*: JsonNode
+    error*: JsonNode
+    response*: Option[GenerateVideosResponse]
+    result*: Option[GenerateVideosResponse]
+
 proc partFromText*(text: string): Part =
   Part(kind: pkText, text: text)
 
@@ -356,6 +398,65 @@ proc upscaleImageConfig*(safetyFilterLevel = none(string),
     imagePreservationFactor: imagePreservationFactor
   )
 
+proc videoFromUri*(uri: string, mimeType = none(string)): Video =
+  if uri.len == 0:
+    raise newException(ValueError, "uri is required for video input")
+  result = Video(uri: some(uri))
+  if mimeType.isSome:
+    if mimeType.get().len == 0:
+      raise newException(ValueError, "mimeType must not be empty when provided")
+    result.mimeType = some(mimeType.get())
+
+proc videoFromBase64*(mimeType: string, dataBase64: string): Video =
+  if mimeType.len == 0:
+    raise newException(ValueError, "mimeType is required for video input")
+  if dataBase64.len == 0:
+    raise newException(ValueError, "dataBase64 is required for video input")
+  Video(bytesBase64: some(dataBase64), mimeType: some(mimeType))
+
+proc videoFromBytes*(data: openArray[byte], mimeType: string): Video =
+  result = videoFromBase64(mimeType, encode(data))
+
+proc videoFromBytes*(data: string, mimeType: string): Video =
+  result = videoFromBase64(mimeType, encode(data))
+
+proc generateVideosSource*(prompt = none(string),
+                           image = none(Image),
+                           video = none(Video)): GenerateVideosSource =
+  GenerateVideosSource(
+    prompt: prompt,
+    image: image,
+    video: video
+  )
+
+proc videoGenerationReferenceImage*(image: Image,
+                                    referenceType = none(string)): VideoGenerationReferenceImage =
+  VideoGenerationReferenceImage(
+    image: image,
+    referenceType: referenceType
+  )
+
+proc generateVideosConfig*(numberOfVideos = none(int),
+                           durationSeconds = none(int),
+                           aspectRatio = none(string),
+                           resolution = none(string),
+                           personGeneration = none(string),
+                           negativePrompt = none(string),
+                           enhancePrompt = none(bool),
+                           lastFrame = none(Image),
+                           referenceImages: seq[VideoGenerationReferenceImage] = @[]): GenerateVideosConfig =
+  GenerateVideosConfig(
+    numberOfVideos: numberOfVideos,
+    durationSeconds: durationSeconds,
+    aspectRatio: aspectRatio,
+    resolution: resolution,
+    personGeneration: personGeneration,
+    negativePrompt: negativePrompt,
+    enhancePrompt: enhancePrompt,
+    lastFrame: lastFrame,
+    referenceImages: referenceImages
+  )
+
 proc toJson*(functionCall: FunctionCall): JsonNode =
   result = newJObject()
   result["name"] = %functionCall.name
@@ -432,6 +533,15 @@ proc toJson*(image: Image): JsonNode =
   result = newJObject()
   result["bytesBase64Encoded"] = %image.bytesBase64
   result["mimeType"] = %image.mimeType
+
+proc toJson*(video: Video): JsonNode =
+  result = newJObject()
+  if video.uri.isSome:
+    result["uri"] = %video.uri.get()
+  if video.bytesBase64.isSome:
+    result["encodedVideo"] = %video.bytesBase64.get()
+  if video.mimeType.isSome:
+    result["encoding"] = %video.mimeType.get()
 
 proc toJson*(config: GenerateImagesConfig): JsonNode =
   result = newJObject()
@@ -515,6 +625,38 @@ proc toJson*(config: UpscaleImageConfig): JsonNode =
     if config.outputCompressionQuality.isSome:
       outputOptions["compressionQuality"] = %config.outputCompressionQuality.get()
     result["outputOptions"] = outputOptions
+
+proc toJson*(source: GenerateVideosSource): JsonNode =
+  result = newJObject()
+  if source.prompt.isSome:
+    result["prompt"] = %source.prompt.get()
+  if source.image.isSome:
+    result["image"] = source.image.get().toJson()
+  if source.video.isSome:
+    result["video"] = source.video.get().toJson()
+
+proc toJson*(referenceImage: VideoGenerationReferenceImage): JsonNode =
+  result = newJObject()
+  result["image"] = referenceImage.image.toJson()
+  if referenceImage.referenceType.isSome:
+    result["referenceType"] = %referenceImage.referenceType.get()
+
+proc toJson*(config: GenerateVideosConfig): JsonNode =
+  result = newJObject()
+  if config.numberOfVideos.isSome:
+    result["sampleCount"] = %config.numberOfVideos.get()
+  if config.durationSeconds.isSome:
+    result["durationSeconds"] = %config.durationSeconds.get()
+  if config.aspectRatio.isSome:
+    result["aspectRatio"] = %config.aspectRatio.get()
+  if config.resolution.isSome:
+    result["resolution"] = %config.resolution.get()
+  if config.personGeneration.isSome:
+    result["personGeneration"] = %config.personGeneration.get()
+  if config.negativePrompt.isSome:
+    result["negativePrompt"] = %config.negativePrompt.get()
+  if config.enhancePrompt.isSome:
+    result["enhancePrompt"] = %config.enhancePrompt.get()
 
 proc toJson*(part: Part): JsonNode =
   result = newJObject()
@@ -746,3 +888,175 @@ proc extractGeneratedImages*(raw: JsonNode): seq[GeneratedImage] =
         result.add(generated)
   except CatchableError:
     result = @[]
+
+proc extractVideo*(raw: JsonNode): Option[Video] =
+  try:
+    if raw.kind != JObject:
+      return none(Video)
+
+    var video = Video(
+      uri: none(string),
+      bytesBase64: none(string),
+      mimeType: none(string)
+    )
+    var hasAny = false
+
+    if raw.hasKey("uri") and raw["uri"].kind == JString:
+      video.uri = some(raw["uri"].getStr())
+      hasAny = true
+    elif raw.hasKey("gcsUri") and raw["gcsUri"].kind == JString:
+      video.uri = some(raw["gcsUri"].getStr())
+      hasAny = true
+
+    if raw.hasKey("encodedVideo") and raw["encodedVideo"].kind == JString:
+      video.bytesBase64 = some(raw["encodedVideo"].getStr())
+      hasAny = true
+    elif raw.hasKey("bytesBase64Encoded") and raw["bytesBase64Encoded"].kind == JString:
+      video.bytesBase64 = some(raw["bytesBase64Encoded"].getStr())
+      hasAny = true
+
+    if raw.hasKey("encoding") and raw["encoding"].kind == JString:
+      video.mimeType = some(raw["encoding"].getStr())
+      hasAny = true
+    elif raw.hasKey("mimeType") and raw["mimeType"].kind == JString:
+      video.mimeType = some(raw["mimeType"].getStr())
+      hasAny = true
+
+    if hasAny:
+      return some(video)
+  except CatchableError:
+    discard
+  result = none(Video)
+
+proc extractGeneratedVideos*(raw: JsonNode): seq[GeneratedVideo] =
+  try:
+    if raw.kind != JObject:
+      return @[]
+
+    var samples: JsonNode = nil
+    if raw.hasKey("generatedSamples") and raw["generatedSamples"].kind == JArray:
+      samples = raw["generatedSamples"]
+    elif raw.hasKey("videos") and raw["videos"].kind == JArray:
+      samples = raw["videos"]
+    elif raw.hasKey("generatedVideos") and raw["generatedVideos"].kind == JArray:
+      samples = raw["generatedVideos"]
+    elif raw.hasKey("generated_videos") and raw["generated_videos"].kind == JArray:
+      samples = raw["generated_videos"]
+    if samples.isNil:
+      return @[]
+
+    for sample in samples:
+      if sample.kind != JObject:
+        continue
+
+      var videoNode: JsonNode = nil
+      if sample.hasKey("video") and sample["video"].kind == JObject:
+        videoNode = sample["video"]
+      elif sample.hasKey("_self") and sample["_self"].kind == JObject:
+        videoNode = sample["_self"]
+      else:
+        videoNode = sample
+
+      let video = extractVideo(videoNode)
+      if video.isSome:
+        result.add(GeneratedVideo(video: video))
+  except CatchableError:
+    result = @[]
+
+proc extractGenerateVideosResponse*(raw: JsonNode): Option[GenerateVideosResponse] =
+  try:
+    if raw.kind != JObject:
+      return none(GenerateVideosResponse)
+
+    var response = GenerateVideosResponse(
+      generatedVideos: @[],
+      raiMediaFilteredCount: none(int),
+      raiMediaFilteredReasons: @[]
+    )
+    var hasAny = false
+
+    response.generatedVideos = extractGeneratedVideos(raw)
+    if response.generatedVideos.len > 0:
+      hasAny = true
+
+    if raw.hasKey("raiMediaFilteredCount"):
+      let countNode = raw["raiMediaFilteredCount"]
+      if countNode.kind == JInt:
+        response.raiMediaFilteredCount = some(countNode.getInt())
+        hasAny = true
+      elif countNode.kind == JFloat:
+        response.raiMediaFilteredCount = some(int(countNode.getFloat()))
+        hasAny = true
+    elif raw.hasKey("rai_media_filtered_count"):
+      let countNode = raw["rai_media_filtered_count"]
+      if countNode.kind == JInt:
+        response.raiMediaFilteredCount = some(countNode.getInt())
+        hasAny = true
+      elif countNode.kind == JFloat:
+        response.raiMediaFilteredCount = some(int(countNode.getFloat()))
+        hasAny = true
+
+    if raw.hasKey("raiMediaFilteredReasons") and raw["raiMediaFilteredReasons"].kind == JArray:
+      for reason in raw["raiMediaFilteredReasons"]:
+        if reason.kind == JString:
+          response.raiMediaFilteredReasons.add(reason.getStr())
+      hasAny = true
+    elif raw.hasKey("rai_media_filtered_reasons") and raw["rai_media_filtered_reasons"].kind == JArray:
+      for reason in raw["rai_media_filtered_reasons"]:
+        if reason.kind == JString:
+          response.raiMediaFilteredReasons.add(reason.getStr())
+      hasAny = true
+
+    if hasAny:
+      return some(response)
+  except CatchableError:
+    discard
+  result = none(GenerateVideosResponse)
+
+proc parseGenerateVideosOperation*(raw: JsonNode): GenerateVideosOperation =
+  result = GenerateVideosOperation(
+    raw: raw,
+    name: "",
+    done: none(bool),
+    metadata: newJNull(),
+    error: newJNull(),
+    response: none(GenerateVideosResponse),
+    result: none(GenerateVideosResponse)
+  )
+  try:
+    if raw.kind != JObject:
+      return result
+
+    if raw.hasKey("name") and raw["name"].kind == JString:
+      result.name = raw["name"].getStr()
+
+    if raw.hasKey("done") and raw["done"].kind == JBool:
+      result.done = some(raw["done"].getBool())
+
+    if raw.hasKey("metadata"):
+      result.metadata = raw["metadata"]
+
+    if raw.hasKey("error"):
+      result.error = raw["error"]
+
+    var responseNode: JsonNode = nil
+    if raw.hasKey("response"):
+      let response = raw["response"]
+      if response.kind == JObject and response.hasKey("generateVideoResponse"):
+        responseNode = response["generateVideoResponse"]
+      elif response.kind == JObject:
+        responseNode = response
+    if responseNode.isNil and raw.hasKey("result"):
+      let operationResult = raw["result"]
+      if operationResult.kind == JObject and operationResult.hasKey("generateVideoResponse"):
+        responseNode = operationResult["generateVideoResponse"]
+      elif operationResult.kind == JObject:
+        responseNode = operationResult
+
+    if not responseNode.isNil:
+      let parsedResponse = extractGenerateVideosResponse(responseNode)
+      if parsedResponse.isSome:
+        result.response = parsedResponse
+        result.result = parsedResponse
+  except CatchableError:
+    discard

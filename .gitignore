@@ -12,3 +12,6 @@ nimcache/
 *.out
 *.pdb
 *.dSYM/
+test
+tests/test_*
+!tests/*.nim

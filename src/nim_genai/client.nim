@@ -170,6 +170,80 @@ proc buildUpscaleImageRequest(image: Image, upscaleFactor: string,
 
   result["parameters"] = paramsNode
 
+proc validateVideoInput(video: Video) =
+  let hasUri = video.uri.isSome and video.uri.get().len > 0
+  let hasBytes = video.bytesBase64.isSome and video.bytesBase64.get().len > 0
+  if not hasUri and not hasBytes:
+    raise newException(ValueError, "video must include uri or bytes")
+  if hasBytes and (not video.mimeType.isSome or video.mimeType.get().len == 0):
+    raise newException(ValueError, "video mimeType is required when bytes are provided")
+
+proc validateGenerateVideosSource(source: GenerateVideosSource) =
+  if source.prompt.isSome and source.prompt.get().len == 0:
+    raise newException(ValueError, "source.prompt must not be empty")
+  if source.image.isSome:
+    let image = source.image.get()
+    if image.bytesBase64.len == 0:
+      raise newException(ValueError, "source.image bytes are required")
+    if image.mimeType.len == 0:
+      raise newException(ValueError, "source.image mimeType is required")
+  if source.video.isSome:
+    validateVideoInput(source.video.get())
+
+  let hasPrompt = source.prompt.isSome and source.prompt.get().len > 0
+  let hasImage = source.image.isSome
+  let hasVideo = source.video.isSome
+  if not hasPrompt and not hasImage and not hasVideo:
+    raise newException(ValueError, "source must include prompt, image, or video")
+
+proc normalizeVideoForMldev(video: Video): Video =
+  ## Gemini Developer API does not support video bytes when URI is also provided.
+  result = video
+  let hasUri = video.uri.isSome and video.uri.get().len > 0
+  let hasBytes = video.bytesBase64.isSome and video.bytesBase64.get().len > 0
+  if hasUri and hasBytes:
+    result.bytesBase64 = none(string)
+
+proc buildGenerateVideosRequest(prompt: string,
+                                image: Option[Image],
+                                video: Option[Video],
+                                source: Option[GenerateVideosSource],
+                                config: GenerateVideosConfig): JsonNode =
+  result = newJObject()
+  let instancesNode = newJArray()
+  let instanceNode = newJObject()
+
+  if source.isSome:
+    let sourceValue = source.get()
+    if sourceValue.prompt.isSome:
+      instanceNode["prompt"] = %sourceValue.prompt.get()
+    if sourceValue.image.isSome:
+      instanceNode["image"] = sourceValue.image.get().toJson()
+    if sourceValue.video.isSome:
+      instanceNode["video"] = normalizeVideoForMldev(sourceValue.video.get()).toJson()
+  else:
+    if prompt.len > 0:
+      instanceNode["prompt"] = %prompt
+    if image.isSome:
+      instanceNode["image"] = image.get().toJson()
+    if video.isSome:
+      instanceNode["video"] = normalizeVideoForMldev(video.get()).toJson()
+
+  if config.lastFrame.isSome:
+    instanceNode["lastFrame"] = config.lastFrame.get().toJson()
+  if config.referenceImages.len > 0:
+    let referencesNode = newJArray()
+    for referenceImage in config.referenceImages:
+      referencesNode.add(referenceImage.toJson())
+    instanceNode["referenceImages"] = referencesNode
+
+  instancesNode.add(instanceNode)
+  result["instances"] = instancesNode
+
+  let paramsNode = config.toJson()
+  if paramsNode.len > 0:
+    result["parameters"] = paramsNode
+
 proc buildGenerateContentUrl(client: Client, model: string, stream: bool): string =
   let modelPath = normalizeModelPath(model)
   var path = client.apiVersion & "/" & modelPath
@@ -188,6 +262,23 @@ proc buildPredictUrl(client: Client, model: string): string =
   let modelPath = normalizeModelPath(model)
   let path = client.apiVersion & "/" & modelPath & ":predict"
   result = joinUrl(client.baseUrl, path)
+
+proc buildPredictLongRunningUrl(client: Client, model: string): string =
+  let modelPath = normalizeModelPath(model)
+  let path = client.apiVersion & "/" & modelPath & ":predictLongRunning"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildOperationUrl(client: Client, operationName: string): string =
+  var normalizedName = operationName
+  if normalizedName.startsWith("/"):
+    normalizedName = normalizedName[1 .. ^1]
+
+  if normalizedName.startsWith("http://") or normalizedName.startsWith("https://"):
+    return normalizedName
+
+  if not normalizedName.startsWith(client.apiVersion & "/"):
+    normalizedName = client.apiVersion & "/" & normalizedName
+  result = joinUrl(client.baseUrl, normalizedName)
 
 proc extractErrorCode(raw: JsonNode, fallbackCode: int): int =
   result = fallbackCode
@@ -258,6 +349,10 @@ proc parseUpscaleImagePayloadToResponse(payload: string, fallbackCode: int): Ups
     raw: raw,
     generatedImages: extractGeneratedImages(raw)
   )
+
+proc parseGenerateVideosOperationPayload(payload: string): GenerateVideosOperation =
+  let raw = parseJson(payload)
+  result = parseGenerateVideosOperation(raw)
 
 proc shouldDisableAfc(config: GenerateContentConfig): bool =
   if config.automaticFunctionCalling.isSome:
@@ -435,6 +530,76 @@ proc upscaleImageInternal(client: Client, model: string, image: Image,
     raise newGenAIError(statusCode, respBody)
 
   result = parseUpscaleImagePayloadToResponse(respBody, statusCode)
+
+proc generateVideosInternal(client: Client, model: string,
+                            prompt: string,
+                            image: Option[Image],
+                            video: Option[Video],
+                            source: Option[GenerateVideosSource],
+                            config: GenerateVideosConfig): Future[GenerateVideosOperation]
+                            {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if source.isSome and (prompt.len > 0 or image.isSome or video.isSome):
+    raise newException(ValueError, "source and prompt/image/video are mutually exclusive")
+
+  if source.isSome:
+    validateGenerateVideosSource(source.get())
+  else:
+    if image.isSome:
+      let imageValue = image.get()
+      if imageValue.bytesBase64.len == 0:
+        raise newException(ValueError, "image bytes are required")
+      if imageValue.mimeType.len == 0:
+        raise newException(ValueError, "image mimeType is required")
+    if video.isSome:
+      validateVideoInput(video.get())
+    if prompt.len == 0 and not image.isSome and not video.isSome:
+      raise newException(ValueError, "prompt, image, video, or source is required")
+
+  if config.lastFrame.isSome:
+    let lastFrame = config.lastFrame.get()
+    if lastFrame.bytesBase64.len == 0:
+      raise newException(ValueError, "config.lastFrame bytes are required")
+    if lastFrame.mimeType.len == 0:
+      raise newException(ValueError, "config.lastFrame mimeType is required")
+
+  for referenceImage in config.referenceImages:
+    if referenceImage.image.bytesBase64.len == 0:
+      raise newException(ValueError, "reference image bytes are required")
+    if referenceImage.image.mimeType.len == 0:
+      raise newException(ValueError, "reference image mimeType is required")
+
+  let url = buildPredictLongRunningUrl(client, model)
+  let bodyJson = buildGenerateVideosRequest(prompt, image, video, source, config)
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGenerateVideosOperationPayload(respBody)
+
+proc getOperationInternal(client: Client,
+                          operationName: string): Future[GenerateVideosOperation]
+                          {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if operationName.len == 0:
+    raise newException(ValueError, "operationName is required")
+
+  let url = buildOperationUrl(client, operationName)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGenerateVideosOperationPayload(respBody)
 
 proc generateContentAfcInternal(client: Client, model: string,
                                 contents: seq[Content],
@@ -638,6 +803,68 @@ proc upscaleImage*(client: Client, model: string, image: Image,
                    config: UpscaleImageConfig = UpscaleImageConfig()): Future[UpscaleImageResponse]
                    {.async.} =
   result = await upscaleImageInternal(client, model, image, upscaleFactor, config)
+
+proc generateVideos*(client: Client, model: string, prompt: string,
+                     config: GenerateVideosConfig = GenerateVideosConfig()): Future[GenerateVideosOperation]
+                     {.async.} =
+  result = await generateVideosInternal(
+    client = client,
+    model = model,
+    prompt = prompt,
+    image = none(Image),
+    video = none(Video),
+    source = none(GenerateVideosSource),
+    config = config
+  )
+
+proc generateVideos*(client: Client, model: string, source: GenerateVideosSource,
+                     config: GenerateVideosConfig = GenerateVideosConfig()): Future[GenerateVideosOperation]
+                     {.async.} =
+  result = await generateVideosInternal(
+    client = client,
+    model = model,
+    prompt = "",
+    image = none(Image),
+    video = none(Video),
+    source = some(source),
+    config = config
+  )
+
+proc generateVideos*(client: Client, model: string, image: Image,
+                     prompt = "",
+                     config: GenerateVideosConfig = GenerateVideosConfig()): Future[GenerateVideosOperation]
+                     {.async.} =
+  result = await generateVideosInternal(
+    client = client,
+    model = model,
+    prompt = prompt,
+    image = some(image),
+    video = none(Video),
+    source = none(GenerateVideosSource),
+    config = config
+  )
+
+proc generateVideos*(client: Client, model: string, video: Video,
+                     prompt = "",
+                     config: GenerateVideosConfig = GenerateVideosConfig()): Future[GenerateVideosOperation]
+                     {.async.} =
+  result = await generateVideosInternal(
+    client = client,
+    model = model,
+    prompt = prompt,
+    image = none(Image),
+    video = some(video),
+    source = none(GenerateVideosSource),
+    config = config
+  )
+
+proc getOperation*(client: Client, operationName: string): Future[GenerateVideosOperation]
+                   {.async.} =
+  result = await getOperationInternal(client, operationName)
+
+proc getOperation*(client: Client, operation: GenerateVideosOperation): Future[GenerateVideosOperation]
+                   {.async.} =
+  result = await getOperationInternal(client, operation.name)
 
 proc generateContentStreamInternal(client: Client, model: string, contents: seq[Content],
                                    config: GenerateContentConfig,

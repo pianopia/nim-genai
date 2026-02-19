@@ -10,13 +10,13 @@ implemented in the current Nim MVP.
 - [x] System instruction as structured content
 - [x] Embeddings / `embedContent`
 - [x] Image generation / editing / upscaling
-- [ ] Video generation / extension (Veo)
+- [x] Video generation / extension (Veo)
 - [ ] Audio / speech features
 - [ ] Files API (upload, list, delete)
 - [ ] File search stores
 - [ ] Caches API
 - [ ] Batches API
-- [ ] Operations / long‑running operations (LRO)
+- [ ] Operations / long‑running operations (LRO) (partial: video polling via `getOperation`)
 - [ ] Tunings / fine‑tuning
 - [ ] Tokens API (count tokens)
 - [ ] Models API (list/get model metadata)

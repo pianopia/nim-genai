@@ -237,6 +237,49 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+## Video generation / extension (Veo)
+
+```nim
+import std/[asyncdispatch, options]
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  var operation = await client.generateVideos(
+    model = "veo-2.0-generate-001",
+    source = generateVideosSource(
+      prompt = some("A neon hologram of a cat driving at top speed")
+    ),
+    config = generateVideosConfig(
+      numberOfVideos = some(1),
+      durationSeconds = some(6)
+    )
+  )
+
+  while (not operation.done.isSome) or (not operation.done.get()):
+    # Poll long-running operation status.
+    operation = await client.getOperation(operation)
+
+  if operation.result.isSome and operation.result.get().generatedVideos.len > 0:
+    let generated = operation.result.get().generatedVideos[0]
+    if generated.video.isSome and generated.video.get().uri.isSome:
+      echo generated.video.get().uri.get()
+
+  # Video extension: pass an input video in source.video.
+  discard await client.generateVideos(
+    model = "veo-2.0-generate-001",
+    source = generateVideosSource(
+      prompt = some("Continue this video with sunrise"),
+      video = some(videoFromUri("gs://my-bucket/base.mp4", some("video/mp4")))
+    )
+  )
+
+  client.close()
+
+waitFor main()
+```
+
 You can also import using the module name with backticks:
 
 ```nim
@@ -252,7 +295,8 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 
 ## Notes
 
-- This MVP supports `generateContent`, `generateContentStream`, and `embedContent`.
+- This MVP supports `generateContent`, `generateContentStream`, `embedContent`,
+  and Veo `generateVideos` (+ `getOperation` polling).
 - Image APIs (`generateImages`, `editImage`, `upscaleImage`) are available via Imagen `:predict`.
 - `generateContent` supports text, `inlineData`, and `fileData` parts.
 - `systemInstruction` supports both text and structured `Content`.
