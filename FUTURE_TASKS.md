@@ -12,15 +12,15 @@ implemented in the current Nim MVP.
 - [x] Image generation / editing / upscaling
 - [x] Video generation / extension (Veo)
 - [ ] Audio / speech features
-- [ ] Files API (upload, list, delete)
+- [x] Files API (list/get/delete/upload/download/register)
 - [ ] File search stores
 - [ ] Caches API
 - [ ] Batches API
 - [ ] Operations / long‑running operations (LRO) (partial: video polling via `getOperation`)
 - [ ] Tunings / fine‑tuning
-- [ ] Tokens API (count tokens)
-- [ ] Models API (list/get model metadata)
-- [ ] Chats / sessions
+- [x] Tokens API (count tokens)
+- [x] Models API (list/get/update/delete)
+- [x] Chats / sessions
 - [ ] Documents API
 - [ ] Interactions API
 - [ ] Live API / Live music

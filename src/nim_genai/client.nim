@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asyncstreams, httpclient, json, options, os, strutils, tables]
+import std/[asyncdispatch, asyncstreams, httpclient, json, mimetypes, options, os, strutils, tables]
 
 import ./types
 import ./errors
@@ -46,6 +46,62 @@ proc normalizeModelPath(model: string): string =
     result = model
   else:
     result = "models/" & model
+
+proc normalizeFileName(fileName: string): string =
+  if fileName.len == 0:
+    raise newException(ValueError, "file name is required")
+
+  var normalized = fileName
+  if normalized.startsWith("https://"):
+    let marker = "files/"
+    let markerIndex = normalized.find(marker)
+    if markerIndex < 0:
+      raise newException(ValueError, "could not extract file name from URI: " & fileName)
+    let suffixStart = markerIndex + marker.len
+    if suffixStart >= normalized.len:
+      raise newException(ValueError, "could not extract file name from URI: " & fileName)
+    let suffix = normalized[suffixStart .. ^1]
+    var extracted = ""
+    for c in suffix:
+      if c in {'a'..'z', '0'..'9'}:
+        extracted.add(c)
+      else:
+        break
+    if extracted.len == 0:
+      raise newException(ValueError, "could not extract file name from URI: " & fileName)
+    normalized = extracted
+  elif normalized.startsWith("files/"):
+    if normalized.len <= "files/".len:
+      raise newException(ValueError, "file name is required")
+    normalized = normalized["files/".len .. ^1]
+
+  if normalized.len == 0:
+    raise newException(ValueError, "file name is required")
+  result = normalized
+
+proc normalizeUploadedFileName(name: string): string =
+  if name.len == 0:
+    raise newException(ValueError, "file name is required")
+  if name.startsWith("files/"):
+    return name
+  result = "files/" & name
+
+proc detectMimeType(filePath: string,
+                    configuredMimeType: Option[string]): string =
+  if configuredMimeType.isSome:
+    let mimeType = configuredMimeType.get().strip()
+    if mimeType.len == 0:
+      raise newException(ValueError, "config.mimeType must not be empty")
+    return mimeType
+
+  let ext = splitFile(filePath).ext
+  if ext.len > 1:
+    let db = newMimetypes()
+    let guessed = db.getMimetype(ext[1 .. ^1], "")
+    if guessed.len > 0:
+      return guessed
+
+  result = "application/octet-stream"
 
 proc resolveApiKey(apiKey: string): string =
   if apiKey.len > 0:
@@ -117,6 +173,33 @@ proc buildEmbedContentRequest(modelPath: string, contents: seq[Content],
       requestNode[key] = value
     requestsNode.add(requestNode)
   result["requests"] = requestsNode
+
+proc buildCountTokensRequest(contents: seq[Content],
+                             config: CountTokensConfig): JsonNode =
+  result = newJObject()
+  let contentsNode = newJArray()
+  for content in contents:
+    contentsNode.add(content.toJson())
+  result["contents"] = contentsNode
+
+  if config.systemInstruction.isSome:
+    raise newException(
+      ValueError,
+      "systemInstruction in countTokens config is not supported in Gemini API."
+    )
+  if config.tools.len > 0:
+    raise newException(
+      ValueError,
+      "tools in countTokens config are not supported in Gemini API."
+    )
+  if config.generationConfig.isSome:
+    raise newException(
+      ValueError,
+      "generationConfig in countTokens config is not supported in Gemini API."
+    )
+
+proc buildUpdateModelRequest(config: UpdateModelConfig): JsonNode =
+  result = config.toJson()
 
 proc buildGenerateImagesRequest(prompt: string,
                                 config: GenerateImagesConfig): JsonNode =
@@ -258,6 +341,96 @@ proc buildEmbedContentUrl(client: Client, model: string): string =
   let path = client.apiVersion & "/" & modelPath & ":batchEmbedContents"
   result = joinUrl(client.baseUrl, path)
 
+proc buildCountTokensUrl(client: Client, model: string): string =
+  let modelPath = normalizeModelPath(model)
+  let path = client.apiVersion & "/" & modelPath & ":countTokens"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildGetModelUrl(client: Client, model: string): string =
+  let modelPath = normalizeModelPath(model)
+  let path = client.apiVersion & "/" & modelPath
+  result = joinUrl(client.baseUrl, path)
+
+proc buildUpdateModelUrl(client: Client, model: string): string =
+  result = buildGetModelUrl(client, model)
+
+proc buildDeleteModelUrl(client: Client, model: string): string =
+  result = buildGetModelUrl(client, model)
+
+proc buildListModelsUrl(client: Client, config: ListModelsConfig): string =
+  var path = client.apiVersion & "/"
+  let queryBase = if config.queryBase.isSome: config.queryBase.get() else: true
+  if queryBase:
+    path.add("models")
+  else:
+    path.add("tunedModels")
+  result = joinUrl(client.baseUrl, path)
+
+  var queryParams: seq[string] = @[]
+  if config.pageSize.isSome:
+    queryParams.add("pageSize=" & $config.pageSize.get())
+  if config.pageToken.isSome:
+    queryParams.add("pageToken=" & config.pageToken.get())
+  if config.filter.isSome:
+    queryParams.add("filter=" & config.filter.get())
+  if queryParams.len > 0:
+    result.add("?" & queryParams.join("&"))
+
+proc buildGetFileUrl(client: Client, fileName: string): string =
+  let normalizedFileName = normalizeFileName(fileName)
+  let path = client.apiVersion & "/files/" & normalizedFileName
+  result = joinUrl(client.baseUrl, path)
+
+proc buildDeleteFileUrl(client: Client, fileName: string): string =
+  result = buildGetFileUrl(client, fileName)
+
+proc buildListFilesUrl(client: Client, config: ListFilesConfig): string =
+  let path = client.apiVersion & "/files"
+  result = joinUrl(client.baseUrl, path)
+
+  var queryParams: seq[string] = @[]
+  if config.pageSize.isSome:
+    queryParams.add("pageSize=" & $config.pageSize.get())
+  if config.pageToken.isSome:
+    queryParams.add("pageToken=" & config.pageToken.get())
+  if queryParams.len > 0:
+    result.add("?" & queryParams.join("&"))
+
+proc buildUploadFilesUrl(client: Client): string =
+  let path = "upload/" & client.apiVersion & "/files"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildDownloadFileUrl(client: Client, fileName: string): string =
+  let normalizedFileName = normalizeFileName(fileName)
+  let path = client.apiVersion & "/files/" & normalizedFileName & ":download?alt=media"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildRegisterFilesUrl(client: Client): string =
+  let path = client.apiVersion & "/files:register"
+  result = joinUrl(client.baseUrl, path)
+
+proc buildUploadFileStartRequest(fileName: string,
+                                 displayName: Option[string],
+                                 mimeType: string): JsonNode =
+  result = newJObject()
+  let fileNode = newJObject()
+  fileNode["mimeType"] = %mimeType
+  if fileName.len > 0:
+    fileNode["name"] = %normalizeUploadedFileName(fileName)
+  if displayName.isSome:
+    let value = displayName.get()
+    if value.len == 0:
+      raise newException(ValueError, "config.displayName must not be empty")
+    fileNode["displayName"] = %value
+  result["file"] = fileNode
+
+proc buildRegisterFilesRequest(uris: seq[string]): JsonNode =
+  result = newJObject()
+  let urisNode = newJArray()
+  for uri in uris:
+    urisNode.add(%uri)
+  result["uris"] = urisNode
+
 proc buildPredictUrl(client: Client, model: string): string =
   let modelPath = normalizeModelPath(model)
   let path = client.apiVersion & "/" & modelPath & ":predict"
@@ -308,6 +481,83 @@ proc parseEmbedPayloadToResponse(payload: string, fallbackCode: int): EmbedConte
     raw: raw,
     embeddings: extractEmbeddings(raw),
     metadata: extractEmbedContentMetadata(raw)
+  )
+
+proc parseGetModelPayloadToResponse(payload: string, fallbackCode: int): Model =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = extractModel(raw)
+
+proc parseListModelsPayloadToResponse(payload: string, fallbackCode: int): ListModelsResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = ListModelsResponse(
+    raw: raw,
+    nextPageToken: extractListModelsNextPageToken(raw),
+    models: extractModels(raw)
+  )
+
+proc parseCountTokensPayloadToResponse(payload: string, fallbackCode: int): CountTokensResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = extractCountTokensResponse(raw)
+
+proc parseDeleteModelPayloadToResponse(payload: string, fallbackCode: int): DeleteModelResponse =
+  var raw: JsonNode
+  if payload.strip().len == 0:
+    raw = newJObject()
+  else:
+    raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = DeleteModelResponse(raw: raw)
+
+proc parseGetFilePayloadToResponse(payload: string, fallbackCode: int): FileResource =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = extractFileResource(raw)
+
+proc parseListFilesPayloadToResponse(payload: string, fallbackCode: int): ListFilesResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = ListFilesResponse(
+    raw: raw,
+    nextPageToken: extractListFilesNextPageToken(raw),
+    files: extractFiles(raw)
+  )
+
+proc parseDeleteFilePayloadToResponse(payload: string, fallbackCode: int): DeleteFileResponse =
+  var raw: JsonNode
+  if payload.strip().len == 0:
+    raw = newJObject()
+  else:
+    raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = DeleteFileResponse(raw: raw)
+
+proc parseUploadFilePayloadToResponse(payload: string,
+                                      fallbackCode: int): FileResource =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  if raw.kind == JObject and raw.hasKey("file") and raw["file"].kind == JObject:
+    return extractFileResource(raw["file"])
+  result = extractFileResource(raw)
+
+proc parseRegisterFilesPayloadToResponse(payload: string,
+                                         fallbackCode: int): RegisterFilesResponse =
+  let raw = parseJson(payload)
+  if raw.kind == JObject and raw.hasKey("error"):
+    raise newGenAIError(extractErrorCode(raw, fallbackCode), payload)
+  result = RegisterFilesResponse(
+    raw: raw,
+    files: extractFiles(raw)
   )
 
 proc parseGenerateImagesPayloadToResponse(payload: string, fallbackCode: int): GenerateImagesResponse =
@@ -451,6 +701,281 @@ proc embedContentInternal(client: Client, model: string, contents: seq[Content],
     raise newGenAIError(statusCode, respBody)
 
   result = parseEmbedPayloadToResponse(respBody, statusCode)
+
+proc countTokensInternal(client: Client, model: string, contents: seq[Content],
+                         config: CountTokensConfig): Future[CountTokensResponse]
+                         {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+  if contents.len == 0:
+    raise newException(ValueError, "contents is required")
+
+  let url = buildCountTokensUrl(client, model)
+  let bodyJson = buildCountTokensRequest(contents, config)
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseCountTokensPayloadToResponse(respBody, statusCode)
+
+proc getModelInternal(client: Client, model: string): Future[Model]
+                      {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+
+  let url = buildGetModelUrl(client, model)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGetModelPayloadToResponse(respBody, statusCode)
+
+proc listModelsInternal(client: Client,
+                        config: ListModelsConfig): Future[ListModelsResponse]
+                        {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+
+  let url = buildListModelsUrl(client, config)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseListModelsPayloadToResponse(respBody, statusCode)
+
+proc updateModelInternal(client: Client, model: string,
+                         config: UpdateModelConfig): Future[Model]
+                         {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+
+  let url = buildUpdateModelUrl(client, model)
+  let bodyJson = buildUpdateModelRequest(config)
+  let resp = await client.http.request(url, HttpPatch, body = $bodyJson)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGetModelPayloadToResponse(respBody, statusCode)
+
+proc deleteModelInternal(client: Client, model: string): Future[DeleteModelResponse]
+                         {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if model.len == 0:
+    raise newException(ValueError, "model is required")
+
+  let url = buildDeleteModelUrl(client, model)
+  let resp = await client.http.request(url, HttpDelete)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseDeleteModelPayloadToResponse(respBody, statusCode)
+
+proc getFileInternal(client: Client, fileName: string): Future[FileResource]
+                     {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if fileName.len == 0:
+    raise newException(ValueError, "file name is required")
+
+  let url = buildGetFileUrl(client, fileName)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseGetFilePayloadToResponse(respBody, statusCode)
+
+proc listFilesInternal(client: Client, config: ListFilesConfig): Future[ListFilesResponse]
+                       {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+
+  let url = buildListFilesUrl(client, config)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseListFilesPayloadToResponse(respBody, statusCode)
+
+proc deleteFileInternal(client: Client, fileName: string): Future[DeleteFileResponse]
+                        {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if fileName.len == 0:
+    raise newException(ValueError, "file name is required")
+
+  let url = buildDeleteFileUrl(client, fileName)
+  let resp = await client.http.request(url, HttpDelete)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseDeleteFilePayloadToResponse(respBody, statusCode)
+
+proc uploadFileInternal(client: Client, filePath: string,
+                        config: UploadFileConfig): Future[FileResource]
+                        {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if filePath.len == 0:
+    raise newException(ValueError, "filePath is required")
+  if not fileExists(filePath):
+    raise newException(IOError, filePath & " is not a valid file path")
+
+  let mimeType = detectMimeType(filePath, config.mimeType)
+  let fileBytes = readFile(filePath)
+  let uploadSize = fileBytes.len
+
+  let startUrl = buildUploadFilesUrl(client)
+  var startHeaders = newHttpHeaders()
+  startHeaders["Content-Type"] = "application/json"
+  startHeaders["X-Goog-Upload-Protocol"] = "resumable"
+  startHeaders["X-Goog-Upload-Command"] = "start"
+  startHeaders["X-Goog-Upload-Header-Content-Length"] = $uploadSize
+  startHeaders["X-Goog-Upload-Header-Content-Type"] = mimeType
+  startHeaders["X-Goog-Upload-File-Name"] = extractFilename(filePath)
+
+  let startBodyJson = buildUploadFileStartRequest(
+    fileName = if config.name.isSome: config.name.get() else: "",
+    displayName = config.displayName,
+    mimeType = mimeType
+  )
+
+  let startResp = await client.http.request(
+    startUrl,
+    HttpPost,
+    body = $startBodyJson,
+    headers = startHeaders
+  )
+  let startStatusCode = startResp.code.int
+  let startRespBody = await startResp.body()
+  if startStatusCode < 200 or startStatusCode >= 300:
+    raise newGenAIError(startStatusCode, startRespBody)
+
+  var uploadUrl = ""
+  if startResp.headers.hasKey("x-goog-upload-url"):
+    uploadUrl = startResp.headers["x-goog-upload-url"]
+  if uploadUrl.len == 0 and startResp.headers.hasKey("X-Goog-Upload-URL"):
+    uploadUrl = startResp.headers["X-Goog-Upload-URL"]
+  if uploadUrl.len == 0:
+    raise newException(
+      KeyError,
+      "Failed to create file. Upload URL did not return from the create file request."
+    )
+
+  var uploadHeaders = newHttpHeaders()
+  uploadHeaders["X-Goog-Upload-Command"] = "upload, finalize"
+  uploadHeaders["X-Goog-Upload-Offset"] = "0"
+  uploadHeaders["Content-Length"] = $uploadSize
+  uploadHeaders["Content-Type"] = mimeType
+  let uploadResp = await client.http.request(
+    uploadUrl,
+    HttpPost,
+    body = fileBytes,
+    headers = uploadHeaders
+  )
+  let uploadStatusCode = uploadResp.code.int
+  let uploadRespBody = await uploadResp.body()
+  if uploadStatusCode < 200 or uploadStatusCode >= 300:
+    raise newGenAIError(uploadStatusCode, uploadRespBody)
+
+  if uploadResp.headers.hasKey("x-goog-upload-status"):
+    let uploadStatus = ($uploadResp.headers["x-goog-upload-status"]).toLowerAscii()
+    if uploadStatus != "final":
+      raise newException(ValueError, "Failed to upload file: Upload status is not finalized.")
+  elif uploadResp.headers.hasKey("X-Goog-Upload-Status"):
+    let uploadStatus = ($uploadResp.headers["X-Goog-Upload-Status"]).toLowerAscii()
+    if uploadStatus != "final":
+      raise newException(ValueError, "Failed to upload file: Upload status is not finalized.")
+
+  result = parseUploadFilePayloadToResponse(uploadRespBody, uploadStatusCode)
+
+proc downloadFileInternal(client: Client, fileName: string): Future[string]
+                          {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if fileName.len == 0:
+    raise newException(ValueError, "file name is required")
+
+  let url = buildDownloadFileUrl(client, fileName)
+  let resp = await client.http.request(url, HttpGet)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+  result = respBody
+
+proc registerFilesInternal(client: Client, uris: seq[string],
+                           config: RegisterFilesConfig): Future[RegisterFilesResponse]
+                           {.async.} =
+  if client.isNil:
+    raise newException(ValueError, "Client is nil")
+  if uris.len == 0:
+    raise newException(ValueError, "uris is required")
+
+  var normalizedUris: seq[string] = @[]
+  for uri in uris:
+    let normalized = uri.strip()
+    if normalized.len == 0:
+      raise newException(ValueError, "uris must not contain empty values")
+    if not normalized.startsWith("gs://"):
+      raise newException(ValueError, "uris must be Google Cloud Storage URIs (gs://...)")
+    normalizedUris.add(normalized)
+
+  if not config.accessToken.isSome:
+    raise newException(ValueError, "config.accessToken is required")
+  let token = config.accessToken.get().strip()
+  if token.len == 0:
+    raise newException(ValueError, "config.accessToken is required")
+
+  let url = buildRegisterFilesUrl(client)
+  let bodyJson = buildRegisterFilesRequest(normalizedUris)
+
+  var headers = newHttpHeaders()
+  headers["Content-Type"] = "application/json"
+  headers["Authorization"] = "Bearer " & token
+  if config.userProject.isSome:
+    let userProject = config.userProject.get().strip()
+    if userProject.len == 0:
+      raise newException(ValueError, "config.userProject must not be empty")
+    headers["x-goog-user-project"] = userProject
+
+  let resp = await client.http.request(url, HttpPost, body = $bodyJson, headers = headers)
+  let statusCode = resp.code.int
+  let respBody = await resp.body()
+  if statusCode < 200 or statusCode >= 300:
+    raise newGenAIError(statusCode, respBody)
+
+  result = parseRegisterFilesPayloadToResponse(respBody, statusCode)
 
 proc generateImagesInternal(client: Client, model: string, prompt: string,
                             config: GenerateImagesConfig): Future[GenerateImagesResponse]
@@ -787,6 +1312,75 @@ proc embed*(client: Client, model: string, texts: seq[string],
             config: EmbedContentConfig = EmbedContentConfig()): Future[EmbedContentResponse]
             {.async.} =
   result = await client.embedContent(model, texts, config)
+
+proc countTokens*(client: Client, model: string, contents: seq[Content],
+                  config: CountTokensConfig = CountTokensConfig()): Future[CountTokensResponse]
+                  {.async.} =
+  result = await countTokensInternal(client, model, contents, config)
+
+proc countTokens*(client: Client, model: string, content: Content,
+                  config: CountTokensConfig = CountTokensConfig()): Future[CountTokensResponse]
+                  {.async.} =
+  result = await countTokensInternal(client, model, @[content], config)
+
+proc countTokens*(client: Client, model: string, text: string,
+                  config: CountTokensConfig = CountTokensConfig()): Future[CountTokensResponse]
+                  {.async.} =
+  result = await countTokensInternal(client, model, @[contentFromText(text)], config)
+
+proc countTokens*(client: Client, model: string, texts: seq[string],
+                  config: CountTokensConfig = CountTokensConfig()): Future[CountTokensResponse]
+                  {.async.} =
+  var contents: seq[Content] = @[]
+  for text in texts:
+    contents.add(contentFromText(text))
+  result = await countTokensInternal(client, model, contents, config)
+
+proc getModel*(client: Client, model: string): Future[Model]
+               {.async.} =
+  result = await getModelInternal(client, model)
+
+proc listModels*(client: Client,
+                 config: ListModelsConfig = ListModelsConfig()): Future[ListModelsResponse]
+                 {.async.} =
+  result = await listModelsInternal(client, config)
+
+proc updateModel*(client: Client, model: string,
+                  config: UpdateModelConfig): Future[Model]
+                  {.async.} =
+  result = await updateModelInternal(client, model, config)
+
+proc deleteModel*(client: Client, model: string): Future[DeleteModelResponse]
+                  {.async.} =
+  result = await deleteModelInternal(client, model)
+
+proc getFile*(client: Client, fileName: string): Future[FileResource]
+              {.async.} =
+  result = await getFileInternal(client, fileName)
+
+proc listFiles*(client: Client,
+                config: ListFilesConfig = ListFilesConfig()): Future[ListFilesResponse]
+                {.async.} =
+  result = await listFilesInternal(client, config)
+
+proc deleteFile*(client: Client, fileName: string): Future[DeleteFileResponse]
+                 {.async.} =
+  result = await deleteFileInternal(client, fileName)
+
+proc uploadFile*(client: Client, filePath: string,
+                 config: UploadFileConfig = UploadFileConfig()): Future[FileResource]
+                 {.async.} =
+  result = await uploadFileInternal(client, filePath, config)
+
+proc downloadFile*(client: Client, fileName: string): Future[string]
+                   {.async.} =
+  result = await downloadFileInternal(client, fileName)
+
+proc registerFiles*(client: Client, uris: seq[string],
+                    config: RegisterFilesConfig = RegisterFilesConfig()):
+                    Future[RegisterFilesResponse]
+                    {.async.} =
+  result = await registerFilesInternal(client, uris, config)
 
 proc generateImages*(client: Client, model: string, prompt: string,
                      config: GenerateImagesConfig = GenerateImagesConfig()): Future[GenerateImagesResponse]

@@ -40,7 +40,7 @@ waitFor main()
 ## Multimodal Usage
 
 ```nim
-import std/asyncdispatch
+import std/[asyncdispatch, options]
 import nim_genai
 
 proc main() {.async.} =
@@ -136,6 +136,75 @@ proc main() {.async.} =
     config = config
   )
   echo response.text
+
+  client.close()
+
+waitFor main()
+```
+
+## Chats / sessions
+
+```nim
+import std/asyncdispatch
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+  let chat = newChatSession(
+    client = client,
+    model = "gemini-2.5-flash",
+    systemInstruction = "You are concise."
+  )
+
+  let r1 = await chat.sendMessage("Hello")
+  echo r1.text
+
+  let r2 = await chat.sendMessage("Summarize what I just said.")
+  echo r2.text
+
+  client.close()
+
+waitFor main()
+```
+
+## Files API (list/get/delete/upload/download/register)
+
+```nim
+import std/[asyncdispatch, options]
+import nim_genai
+
+proc main() {.async.} =
+  let client = newClient(apiKey = "YOUR_API_KEY")
+
+  # Upload a local file.
+  let uploaded = await client.uploadFile(
+    "path/to/local.txt",
+    uploadFileConfig(displayName = some("local.txt"))
+  )
+  if uploaded.name.isSome:
+    # Download raw bytes.
+    let bytes = await client.downloadFile(uploaded.name.get())
+    echo "downloaded bytes: ", bytes.len
+
+  let listed = await client.listFiles(
+    listFilesConfig(pageSize = some(10))
+  )
+  echo "files: ", listed.files.len
+
+  if listed.files.len > 0 and listed.files[0].name.isSome:
+    let name = listed.files[0].name.get()
+    let fileInfo = await client.getFile(name)
+    echo fileInfo.mimeType
+
+    discard await client.deleteFile(name)
+
+  # Register existing GCS objects (requires OAuth access token).
+  discard await client.registerFiles(
+    uris = @["gs://my-bucket/path/image.jpg"],
+    config = registerFilesConfig(
+      accessToken = some("YOUR_OAUTH_ACCESS_TOKEN")
+    )
+  )
 
   client.close()
 
@@ -296,8 +365,12 @@ If `apiKey` is not provided, the client will read `GOOGLE_API_KEY` and then
 ## Notes
 
 - This MVP supports `generateContent`, `generateContentStream`, `embedContent`,
-  and Veo `generateVideos` (+ `getOperation` polling).
+  `countTokens`, chats/sessions (`newChatSession` + `sendMessage`), and Models API
+  `getModel`/`listModels`/`updateModel`/`deleteModel`, Files API
+  `getFile`/`listFiles`/`deleteFile`/`uploadFile`/`downloadFile`/`registerFiles`,
+  plus Veo `generateVideos` (+ `getOperation` polling).
 - Image APIs (`generateImages`, `editImage`, `upscaleImage`) are available via Imagen `:predict`.
+- `registerFiles` requires an OAuth access token via `registerFilesConfig(accessToken = some(...))`.
 - `generateContent` supports text, `inlineData`, and `fileData` parts.
 - `systemInstruction` supports both text and structured `Content`.
 - Basic tool declarations, function calls, and automatic function calling are supported.

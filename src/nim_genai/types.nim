@@ -209,6 +209,90 @@ type
     response*: Option[GenerateVideosResponse]
     result*: Option[GenerateVideosResponse]
 
+  Model* = object
+    name*: Option[string]
+    displayName*: Option[string]
+    description*: Option[string]
+    version*: Option[string]
+    inputTokenLimit*: Option[int]
+    outputTokenLimit*: Option[int]
+    supportedActions*: seq[string]
+    temperature*: Option[float]
+    maxTemperature*: Option[float]
+    topP*: Option[float]
+    topK*: Option[int]
+    thinking*: Option[bool]
+
+  ListModelsConfig* = object
+    pageSize*: Option[int]
+    pageToken*: Option[string]
+    filter*: Option[string]
+    queryBase*: Option[bool]
+
+  ListModelsResponse* = object
+    raw*: JsonNode
+    nextPageToken*: Option[string]
+    models*: seq[Model]
+
+  CountTokensConfig* = object
+    systemInstruction*: Option[Content]
+    tools*: seq[Tool]
+    generationConfig*: Option[GenerateContentConfig]
+
+  CountTokensResponse* = object
+    raw*: JsonNode
+    totalTokens*: Option[int]
+    cachedContentTokenCount*: Option[int]
+
+  UpdateModelConfig* = object
+    displayName*: Option[string]
+    description*: Option[string]
+    defaultCheckpointId*: Option[string]
+
+  DeleteModelResponse* = object
+    raw*: JsonNode
+
+  FileResource* = object
+    name*: Option[string]
+    displayName*: Option[string]
+    mimeType*: Option[string]
+    sizeBytes*: Option[int]
+    createTime*: Option[string]
+    expirationTime*: Option[string]
+    updateTime*: Option[string]
+    sha256Hash*: Option[string]
+    uri*: Option[string]
+    downloadUri*: Option[string]
+    state*: Option[string]
+    source*: Option[string]
+    videoMetadata*: JsonNode
+    error*: JsonNode
+
+  ListFilesConfig* = object
+    pageSize*: Option[int]
+    pageToken*: Option[string]
+
+  ListFilesResponse* = object
+    raw*: JsonNode
+    nextPageToken*: Option[string]
+    files*: seq[FileResource]
+
+  DeleteFileResponse* = object
+    raw*: JsonNode
+
+  UploadFileConfig* = object
+    name*: Option[string]
+    displayName*: Option[string]
+    mimeType*: Option[string]
+
+  RegisterFilesConfig* = object
+    accessToken*: Option[string]
+    userProject*: Option[string]
+
+  RegisterFilesResponse* = object
+    raw*: JsonNode
+    files*: seq[FileResource]
+
 proc partFromText*(text: string): Part =
   Part(kind: pkText, text: text)
 
@@ -455,6 +539,58 @@ proc generateVideosConfig*(numberOfVideos = none(int),
     enhancePrompt: enhancePrompt,
     lastFrame: lastFrame,
     referenceImages: referenceImages
+  )
+
+proc listModelsConfig*(pageSize = none(int),
+                       pageToken = none(string),
+                       filter = none(string),
+                       queryBase = none(bool)): ListModelsConfig =
+  ListModelsConfig(
+    pageSize: pageSize,
+    pageToken: pageToken,
+    filter: filter,
+    queryBase: queryBase
+  )
+
+proc countTokensConfig*(systemInstruction = none(Content),
+                        tools: seq[Tool] = @[],
+                        generationConfig = none(GenerateContentConfig)): CountTokensConfig =
+  CountTokensConfig(
+    systemInstruction: systemInstruction,
+    tools: tools,
+    generationConfig: generationConfig
+  )
+
+proc updateModelConfig*(displayName = none(string),
+                        description = none(string),
+                        defaultCheckpointId = none(string)): UpdateModelConfig =
+  UpdateModelConfig(
+    displayName: displayName,
+    description: description,
+    defaultCheckpointId: defaultCheckpointId
+  )
+
+proc listFilesConfig*(pageSize = none(int),
+                      pageToken = none(string)): ListFilesConfig =
+  ListFilesConfig(
+    pageSize: pageSize,
+    pageToken: pageToken
+  )
+
+proc uploadFileConfig*(name = none(string),
+                       displayName = none(string),
+                       mimeType = none(string)): UploadFileConfig =
+  UploadFileConfig(
+    name: name,
+    displayName: displayName,
+    mimeType: mimeType
+  )
+
+proc registerFilesConfig*(accessToken = none(string),
+                          userProject = none(string)): RegisterFilesConfig =
+  RegisterFilesConfig(
+    accessToken: accessToken,
+    userProject: userProject
   )
 
 proc toJson*(functionCall: FunctionCall): JsonNode =
@@ -710,6 +846,15 @@ proc toJson*(config: GenerateContentConfig): JsonNode =
     result["toolConfig"] = config.toolConfig.get().toJson()
   if config.automaticFunctionCalling.isSome:
     result["automaticFunctionCalling"] = config.automaticFunctionCalling.get().toJson()
+
+proc toJson*(config: UpdateModelConfig): JsonNode =
+  result = newJObject()
+  if config.displayName.isSome:
+    result["displayName"] = %config.displayName.get()
+  if config.description.isSome:
+    result["description"] = %config.description.get()
+  if config.defaultCheckpointId.isSome:
+    result["defaultCheckpointId"] = %config.defaultCheckpointId.get()
 
 proc extractFunctionCalls*(raw: JsonNode): seq[FunctionCall] =
   try:
@@ -1060,3 +1205,225 @@ proc parseGenerateVideosOperation*(raw: JsonNode): GenerateVideosOperation =
         result.result = parsedResponse
   except CatchableError:
     discard
+
+proc extractModel*(raw: JsonNode): Model =
+  result = Model(
+    name: none(string),
+    displayName: none(string),
+    description: none(string),
+    version: none(string),
+    inputTokenLimit: none(int),
+    outputTokenLimit: none(int),
+    supportedActions: @[],
+    temperature: none(float),
+    maxTemperature: none(float),
+    topP: none(float),
+    topK: none(int),
+    thinking: none(bool)
+  )
+  try:
+    if raw.kind != JObject:
+      return result
+
+    if raw.hasKey("name") and raw["name"].kind == JString:
+      result.name = some(raw["name"].getStr())
+    if raw.hasKey("displayName") and raw["displayName"].kind == JString:
+      result.displayName = some(raw["displayName"].getStr())
+    if raw.hasKey("description") and raw["description"].kind == JString:
+      result.description = some(raw["description"].getStr())
+    if raw.hasKey("version") and raw["version"].kind == JString:
+      result.version = some(raw["version"].getStr())
+
+    if raw.hasKey("inputTokenLimit"):
+      let value = raw["inputTokenLimit"]
+      if value.kind == JInt:
+        result.inputTokenLimit = some(value.getInt())
+      elif value.kind == JFloat:
+        result.inputTokenLimit = some(int(value.getFloat()))
+    if raw.hasKey("outputTokenLimit"):
+      let value = raw["outputTokenLimit"]
+      if value.kind == JInt:
+        result.outputTokenLimit = some(value.getInt())
+      elif value.kind == JFloat:
+        result.outputTokenLimit = some(int(value.getFloat()))
+
+    if raw.hasKey("supportedGenerationMethods") and raw["supportedGenerationMethods"].kind == JArray:
+      for generationMethod in raw["supportedGenerationMethods"]:
+        if generationMethod.kind == JString:
+          result.supportedActions.add(generationMethod.getStr())
+
+    if raw.hasKey("temperature"):
+      let value = raw["temperature"]
+      if value.kind in {JInt, JFloat}:
+        result.temperature = some(value.getFloat())
+    if raw.hasKey("maxTemperature"):
+      let value = raw["maxTemperature"]
+      if value.kind in {JInt, JFloat}:
+        result.maxTemperature = some(value.getFloat())
+    if raw.hasKey("topP"):
+      let value = raw["topP"]
+      if value.kind in {JInt, JFloat}:
+        result.topP = some(value.getFloat())
+    if raw.hasKey("topK"):
+      let value = raw["topK"]
+      if value.kind == JInt:
+        result.topK = some(value.getInt())
+      elif value.kind == JFloat:
+        result.topK = some(int(value.getFloat()))
+    if raw.hasKey("thinking") and raw["thinking"].kind == JBool:
+      result.thinking = some(raw["thinking"].getBool())
+  except CatchableError:
+    discard
+
+proc extractModels*(raw: JsonNode): seq[Model] =
+  try:
+    if raw.kind != JObject:
+      return @[]
+
+    var modelsNode: JsonNode = nil
+    if raw.hasKey("models") and raw["models"].kind == JArray:
+      modelsNode = raw["models"]
+    elif raw.hasKey("tunedModels") and raw["tunedModels"].kind == JArray:
+      modelsNode = raw["tunedModels"]
+    elif raw.hasKey("publisherModels") and raw["publisherModels"].kind == JArray:
+      modelsNode = raw["publisherModels"]
+
+    if modelsNode.isNil:
+      return @[]
+
+    for item in modelsNode:
+      if item.kind == JObject:
+        result.add(extractModel(item))
+  except CatchableError:
+    result = @[]
+
+proc extractListModelsNextPageToken*(raw: JsonNode): Option[string] =
+  try:
+    if raw.kind != JObject:
+      return none(string)
+    if raw.hasKey("nextPageToken") and raw["nextPageToken"].kind == JString:
+      return some(raw["nextPageToken"].getStr())
+  except CatchableError:
+    discard
+  result = none(string)
+
+proc extractCountTokensResponse*(raw: JsonNode): CountTokensResponse =
+  result = CountTokensResponse(
+    raw: raw,
+    totalTokens: none(int),
+    cachedContentTokenCount: none(int)
+  )
+  try:
+    if raw.kind != JObject:
+      return result
+
+    if raw.hasKey("totalTokens"):
+      let value = raw["totalTokens"]
+      if value.kind == JInt:
+        result.totalTokens = some(value.getInt())
+      elif value.kind == JFloat:
+        result.totalTokens = some(int(value.getFloat()))
+
+    if raw.hasKey("cachedContentTokenCount"):
+      let value = raw["cachedContentTokenCount"]
+      if value.kind == JInt:
+        result.cachedContentTokenCount = some(value.getInt())
+      elif value.kind == JFloat:
+        result.cachedContentTokenCount = some(int(value.getFloat()))
+  except CatchableError:
+    discard
+
+proc extractFileResource*(raw: JsonNode): FileResource =
+  result = FileResource(
+    name: none(string),
+    displayName: none(string),
+    mimeType: none(string),
+    sizeBytes: none(int),
+    createTime: none(string),
+    expirationTime: none(string),
+    updateTime: none(string),
+    sha256Hash: none(string),
+    uri: none(string),
+    downloadUri: none(string),
+    state: none(string),
+    source: none(string),
+    videoMetadata: newJNull(),
+    error: newJNull()
+  )
+  try:
+    if raw.kind != JObject:
+      return result
+
+    if raw.hasKey("name") and raw["name"].kind == JString:
+      result.name = some(raw["name"].getStr())
+    if raw.hasKey("displayName") and raw["displayName"].kind == JString:
+      result.displayName = some(raw["displayName"].getStr())
+    if raw.hasKey("mimeType") and raw["mimeType"].kind == JString:
+      result.mimeType = some(raw["mimeType"].getStr())
+
+    if raw.hasKey("sizeBytes"):
+      let sizeNode = raw["sizeBytes"]
+      if sizeNode.kind == JInt:
+        result.sizeBytes = some(sizeNode.getInt())
+      elif sizeNode.kind == JFloat:
+        result.sizeBytes = some(int(sizeNode.getFloat()))
+
+    if raw.hasKey("createTime") and raw["createTime"].kind == JString:
+      result.createTime = some(raw["createTime"].getStr())
+    if raw.hasKey("expirationTime") and raw["expirationTime"].kind == JString:
+      result.expirationTime = some(raw["expirationTime"].getStr())
+    if raw.hasKey("updateTime") and raw["updateTime"].kind == JString:
+      result.updateTime = some(raw["updateTime"].getStr())
+    if raw.hasKey("sha256Hash") and raw["sha256Hash"].kind == JString:
+      result.sha256Hash = some(raw["sha256Hash"].getStr())
+    if raw.hasKey("uri") and raw["uri"].kind == JString:
+      result.uri = some(raw["uri"].getStr())
+    if raw.hasKey("downloadUri") and raw["downloadUri"].kind == JString:
+      result.downloadUri = some(raw["downloadUri"].getStr())
+
+    if raw.hasKey("state"):
+      let stateNode = raw["state"]
+      if stateNode.kind == JString:
+        result.state = some(stateNode.getStr())
+      elif stateNode.kind == JObject and
+           stateNode.hasKey("name") and
+           stateNode["name"].kind == JString:
+        result.state = some(stateNode["name"].getStr())
+
+    if raw.hasKey("source"):
+      let sourceNode = raw["source"]
+      if sourceNode.kind == JString:
+        result.source = some(sourceNode.getStr())
+      elif sourceNode.kind == JObject and
+           sourceNode.hasKey("name") and
+           sourceNode["name"].kind == JString:
+        result.source = some(sourceNode["name"].getStr())
+
+    if raw.hasKey("videoMetadata"):
+      result.videoMetadata = raw["videoMetadata"]
+    if raw.hasKey("error"):
+      result.error = raw["error"]
+  except CatchableError:
+    discard
+
+proc extractFiles*(raw: JsonNode): seq[FileResource] =
+  try:
+    if raw.kind != JObject:
+      return @[]
+    if not raw.hasKey("files") or raw["files"].kind != JArray:
+      return @[]
+    for item in raw["files"]:
+      if item.kind == JObject:
+        result.add(extractFileResource(item))
+  except CatchableError:
+    result = @[]
+
+proc extractListFilesNextPageToken*(raw: JsonNode): Option[string] =
+  try:
+    if raw.kind != JObject:
+      return none(string)
+    if raw.hasKey("nextPageToken") and raw["nextPageToken"].kind == JString:
+      return some(raw["nextPageToken"].getStr())
+  except CatchableError:
+    discard
+  result = none(string)
